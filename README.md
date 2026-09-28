@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![CI](https://github.com/Redragon948/JANUS_AI_CTF/actions/workflows/ci.yml/badge.svg)](https://github.com/Redragon948/JANUS_AI_CTF/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-D22128?logo=apache)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows)](https://www.microsoft.com/windows)
+[![Platforms: Windows & Linux](https://img.shields.io/badge/Platforms-Windows%20%7C%20Linux-0078D4?logo=linux&logoColor=white)](#supporto-windows--linux)
 [![Event: RomHack 2026](https://img.shields.io/badge/Event-RomHack%202026-7C3AED)](https://romhack.io/)
 
 **JANUS** è una challenge CTF locale e bilingue di **AI security**, sviluppata
@@ -29,6 +29,7 @@ offline sulla stessa macchina.
 - [Come funziona](#come-funziona)
 - [Quick start](#quick-start)
 - [Installazione completa](#installazione-completa)
+- [Supporto Windows / Linux](#supporto-windows--linux)
 - [Configurazione dei modelli](#configurazione-dei-modelli)
 - [Utilizzo](#utilizzo)
 - [Configurazione](#configurazione)
@@ -51,7 +52,8 @@ offline sulla stessa macchina.
 - speech-to-text locale con **faster-whisper**;
 - text-to-speech locale con **Piper**, con fallback Windows SAPI;
 - persistenza SQLite, cleanup automatico e protezioni per l'esecuzione locale;
-- launcher PowerShell/Windows e suite di test automatizzata.
+- launcher automatici per Windows, CLI multipiattaforma e suite di test
+  automatizzata.
 
 I pesi LLM, i modelli Whisper e le voci Piper **non sono inclusi** nel
 repository. Gli script di preparazione li installano separatamente in locale.
@@ -60,7 +62,7 @@ repository. Gli script di preparazione li installano separatamente in locale.
 
 ```mermaid
 flowchart LR
-    P[Partecipante] -->|testo o push-to-talk| K[Edge kiosk]
+    P[Partecipante] -->|testo o push-to-talk| K[Browser kiosk]
     K <-->|REST su 127.0.0.1| A[FastAPI]
     A --> E[ChallengeEngine]
     E --> F[FlagService HMAC]
@@ -84,33 +86,64 @@ submission e calcola l'eventuale punteggio.
 
 ## Quick start
 
-Per provare subito interfaccia e flusso senza scaricare modelli:
+La modalità Demo usa un provider mock deterministico e disabilita STT/TTS. È il
+modo più rapido per verificare interfaccia e flusso senza scaricare modelli.
+
+### Windows
 
 ```powershell
 git clone https://github.com/Redragon948/JANUS_AI_CTF.git
 cd JANUS_AI_CTF
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Janus.ps1 -WithDevelopmentTools
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Janus.ps1
 .\JANUS_DEMO.cmd
 ```
 
-La modalità Demo usa un provider mock deterministico e disabilita STT/TTS. È
-ideale per sviluppo e verifica della UI, ma non rappresenta la configurazione
-dell'evento.
+Il launcher apre automaticamente Microsoft Edge in modalità kiosk.
+
+### Linux
+
+```bash
+git clone https://github.com/Redragon948/JANUS_AI_CTF.git
+cd JANUS_AI_CTF
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e ".[speech]"
+.venv/bin/python -m janus \
+  --mode stand \
+  --llm-provider mock \
+  --stt-provider disabled \
+  --tts-provider disabled \
+  --data-dir "$HOME/.local/share/janus/runtime"
+```
+
+Lasciare il processo attivo e aprire `http://127.0.0.1:8000` nel browser. Demo
+è adatta allo sviluppo della UI, ma non rappresenta la configurazione evento.
 
 ## Installazione completa
 
-### Prerequisiti
+### Prerequisiti comuni
 
-- Windows 10/11;
 - Python 3.11 o successivo;
-- Microsoft Edge per l'avvio kiosk automatico;
 - Ollama o un server LLM OpenAI-compatible locale, salvo la modalità Demo;
 - accesso a Internet durante il solo download iniziale dei modelli;
-- spazio locale esterno a OneDrive per modelli e dati runtime.
+- spazio locale dedicato per modelli e dati runtime;
+- un browser moderno con supporto a `MediaRecorder` per il push-to-talk.
 
-### Installazione automatica
+## Supporto Windows / Linux
 
-Da PowerShell, nella root del repository:
+| Funzionalità | Windows 10/11 | Linux |
+| --- | --- | --- |
+| Backend FastAPI e frontend | Sì | Sì |
+| Ollama / OpenAI-compatible / mock | Sì | Sì |
+| faster-whisper | Sì | Sì |
+| Piper TTS | Sì | Sì |
+| Windows SAPI | Sì | No |
+| Launcher e preflight automatico | `.cmd` + PowerShell | CLI Python |
+| Kiosk browser | Edge avviato automaticamente | Chromium/Chrome manuale |
+
+### Windows — installazione
+
+Da PowerShell nella root del repository:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Janus.ps1
@@ -123,7 +156,7 @@ anche pytest, coverage e Ruff:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Janus.ps1 -WithDevelopmentTools
 ```
 
-### Installazione manuale per sviluppo
+Installazione manuale equivalente:
 
 ```powershell
 py -3.11 -m venv .venv
@@ -131,11 +164,39 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[speech,dev]"
 ```
 
+### Linux — installazione
+
+Su Debian/Ubuntu assicurarsi che siano disponibili Python e il modulo `venv`:
+
+```bash
+sudo apt install python3 python3-venv
+```
+
+Quindi, dalla root del repository:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e ".[speech]"
+```
+
+Per un ambiente di sviluppo completo:
+
+```bash
+.venv/bin/python -m pip install -e ".[speech,dev]"
+```
+
+Su distribuzioni diverse usare il package manager locale per installare Python
+3.11+ e il relativo supporto agli ambienti virtuali.
+
 ## Configurazione dei modelli
 
 ### Ollama
 
-Con Ollama già installato e avviato:
+Installare e avviare Ollama seguendo la documentazione ufficiale, quindi
+scaricare il modello evento. Il comando `ollama pull` è identico sui due sistemi.
+
+**Windows:**
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Prepare-Ollama.ps1
@@ -148,7 +209,13 @@ tag differente:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Prepare-Ollama.ps1 -Model qwen3:4b-instruct
 ```
 
-### Speech-to-text e text-to-speech
+**Linux:**
+
+```bash
+ollama pull qwen3:4b-instruct
+```
+
+### Speech-to-text e text-to-speech — Windows
 
 Preparare i modelli vocali prima dell'uso offline:
 
@@ -174,20 +241,37 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Prepare-Speech
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Prepare-Speech.ps1 -Destination C:\JANUS\models\faster-whisper-small
 ```
 
+### Speech-to-text e text-to-speech — Linux
+
+Preparare gli stessi modelli in un percorso locale persistente:
+
+```bash
+mkdir -p "$HOME/.local/share/janus/models/piper"
+
+.venv/bin/python scripts/prepare_speech_model.py \
+  --model small \
+  --destination "$HOME/.local/share/janus/models/faster-whisper-small"
+
+.venv/bin/python -m piper.download_voices \
+  --data-dir "$HOME/.local/share/janus/models/piper" \
+  it_IT-paola-medium en_US-lessac-medium
+```
+
+Su Linux non è disponibile il fallback SAPI: per la voce usare Piper oppure
+avviare JANUS con `--tts-provider disabled`.
+
 ## Utilizzo
 
-### Launcher disponibili
+La modalità viene fissata dall'operatore all'avvio e non può essere cambiata dal
+browser durante una sessione.
+
+### Windows — launcher disponibili
 
 | Comando | Modalità | LLM | Voce | Scenario |
 | --- | --- | --- | --- | --- |
 | `.\JANUS_DEMO.cmd` | Stand | Mock | Disabilitata | Demo e sviluppo UI |
 | `.\JANUS_STAND.cmd` | Stand | Ollama | Locale | Partita anonima |
 | `.\JANUS_ARENA.cmd` | Score | Ollama | Locale | Nickname, score e leaderboard |
-
-La modalità viene fissata dall'operatore all'avvio e non può essere cambiata dal
-browser durante una sessione.
-
-### Avvio con Ollama
 
 Con Ollama e il modello già pronti:
 
@@ -200,16 +284,7 @@ I launcher usano `qwen3:4b-instruct` su `http://127.0.0.1:11434`, eseguono il
 preflight di LLM/STT/TTS, avviano FastAPI su `127.0.0.1:8000` e aprono Edge a
 schermo intero. Alla chiusura del browser arrestano anche il backend.
 
-### Server OpenAI-compatible
-
-Avviare separatamente il server locale su `http://127.0.0.1:8080/v1`, quindi:
-
-```powershell
-.\JANUS_STAND.cmd -Provider openai_compatible -BaseUrl http://127.0.0.1:8080/v1 -Model qwen3-4b-janus
-.\JANUS_ARENA.cmd -Provider openai_compatible -BaseUrl http://127.0.0.1:8080/v1 -Model qwen3-4b-janus
-```
-
-### Override operativi
+Override operativi Windows:
 
 ```powershell
 # Dati runtime in un percorso dedicato
@@ -221,13 +296,67 @@ Avviare separatamente il server locale su `http://127.0.0.1:8080/v1`, quindi:
 # TTS tramite Windows SAPI
 .\JANUS_STAND.cmd -TtsProvider sapi
 
-# Modello Whisper già preparato in un percorso personalizzato
+# Modello Whisper in un percorso personalizzato
 .\JANUS_STAND.cmd -SttModel C:\JANUS\models\faster-whisper-small
 ```
 
-Il `DataDir` predefinito è `%LOCALAPPDATA%\JANUS\runtime` e contiene database,
-chiave, audio effimero, profilo Edge e log. Per una leaderboard persistente è
-necessario conservare insieme database e chiave.
+Il `DataDir` predefinito Windows è `%LOCALAPPDATA%\JANUS\runtime`.
+
+### Linux — avvio con Ollama
+
+Modalità Stand con voce locale:
+
+```bash
+.venv/bin/python -m janus \
+  --mode stand \
+  --llm-provider ollama \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model qwen3:4b-instruct \
+  --stt-provider faster_whisper \
+  --stt-model "$HOME/.local/share/janus/models/faster-whisper-small" \
+  --tts-provider piper \
+  --piper-model-it "$HOME/.local/share/janus/models/piper/it_IT-paola-medium.onnx" \
+  --piper-model-en "$HOME/.local/share/janus/models/piper/en_US-lessac-medium.onnx" \
+  --data-dir "$HOME/.local/share/janus/runtime"
+```
+
+Per Arena sostituire `--mode stand` con `--mode score`. Per un'esecuzione solo
+testuale usare `--stt-provider disabled --tts-provider disabled` e omettere i
+percorsi dei modelli vocali.
+
+Aprire poi `http://127.0.0.1:8000`. Se Chromium è installato, da un secondo
+terminale è possibile ottenere una postazione kiosk con:
+
+```bash
+chromium --kiosk http://127.0.0.1:8000
+```
+
+### Server OpenAI-compatible — Windows e Linux
+
+Avviare separatamente il server locale su `http://127.0.0.1:8080/v1`, quindi:
+
+**Windows:**
+
+```powershell
+.\JANUS_STAND.cmd -Provider openai_compatible -BaseUrl http://127.0.0.1:8080/v1 -Model qwen3-4b-janus
+.\JANUS_ARENA.cmd -Provider openai_compatible -BaseUrl http://127.0.0.1:8080/v1 -Model qwen3-4b-janus
+```
+
+**Linux:**
+
+```bash
+.venv/bin/python -m janus \
+  --mode stand \
+  --llm-provider openai_compatible \
+  --llm-base-url http://127.0.0.1:8080/v1 \
+  --llm-model qwen3-4b-janus \
+  --stt-provider disabled \
+  --tts-provider disabled \
+  --data-dir "$HOME/.local/share/janus/runtime"
+```
+
+Il `DataDir` contiene database, chiave e audio effimero. Per una leaderboard
+persistente è necessario conservare insieme database e chiave.
 
 ## Configurazione
 
@@ -249,23 +378,35 @@ impostata, JANUS genera e persiste una chiave nel `DataDir`.
 
 ## Sviluppo e test
 
-Eseguire la suite automatica:
+Eseguire test e lint con l'interprete dell'ambiente virtuale.
+
+**Windows:**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
-```
-
-Controllare stile e qualità statica:
-
-```powershell
 .\.venv\Scripts\python.exe -m ruff check src tests scripts
 ```
 
+**Linux:**
+
+```bash
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff check src tests scripts
+```
+
 Con Ollama e il modello evento disponibili, gli organizzatori possono eseguire
-anche i golden attack reali IT/EN:
+anche i golden attack reali IT/EN.
+
+**Windows:**
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\validate_live_model.py --repeat 2
+```
+
+**Linux:**
+
+```bash
+.venv/bin/python scripts/validate_live_model.py --repeat 2
 ```
 
 > Lo script di validazione contiene percorsi risolutivi ed è destinato agli
@@ -305,14 +446,14 @@ JANUS_AI_CTF/
 ├── configs/                 # Applicazione, modalità, hardware e livelli
 ├── .github/workflows/       # Verifica automatica su GitHub Actions
 ├── docs/                    # Architettura, sicurezza e runbook
-├── scripts/                 # Installazione, avvio e preparazione modelli
+├── scripts/                 # Helper Windows e utility Python multipiattaforma
 ├── src/janus/               # Backend, provider e frontend kiosk
 │   ├── providers/           # Ollama/OpenAI-compatible, STT e TTS
 │   └── web/                 # HTML, CSS e JavaScript
 ├── tests/                   # Suite pytest
-├── JANUS_DEMO.cmd           # Demo senza modelli
-├── JANUS_STAND.cmd          # Modalità anonima
-├── JANUS_ARENA.cmd          # Modalità competitiva
+├── JANUS_DEMO.cmd           # Demo Windows senza modelli
+├── JANUS_STAND.cmd          # Modalità anonima Windows
+├── JANUS_ARENA.cmd          # Modalità competitiva Windows
 └── pyproject.toml           # Packaging e dipendenze
 ```
 
