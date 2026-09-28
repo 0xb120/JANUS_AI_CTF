@@ -1,0 +1,26 @@
+modes:
+  stand:
+    id: "stand"
+    name:
+      it: "Modalità Stand"
+      en: "Stand Mode"
+    description:
+      it: "Partita rapida e anonima: nessun nome, punteggio o dato in classifica."
+      en: "A quick anonymous game: no name, score, or leaderboard data."
+    score_enabled: false
+    nickname_required: false
+    leaderboard_enabled: false
+    show_timer: false
+  score:
+    id: "score"
+    name:
+      it: "Sfida a Punteggio"
+      en: "Ranked Challenge"
+    description:
+      it: "Scegli un nickname, conquista la flag e scala la classifica del livello."
+      en: "Choose a nickname, capture the flag, and climb the level leaderboard."
+    score_enabled: true
+    nickname_required: true
+    leaderboard_enabled: true
+    show_timer: true
+

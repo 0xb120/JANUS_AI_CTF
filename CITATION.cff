@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use JANUS in research, teaching, workshops, or events, please cite the original project."
+title: "JANUS: Offline Bilingual AI Security CTF"
+type: software
+authors:
+  - name: "JANUS contributors"
+version: 0.1.0
+date-released: 2026-09-28
+repository-code: "https://github.com/Redragon948/JANUS_AI_CTF"
+url: "https://github.com/Redragon948/JANUS_AI_CTF"
+license: Apache-2.0
+keywords:
+  - artificial intelligence security
+  - capture the flag
+  - prompt injection
+  - local large language model
+  - bilingual cybersecurity training
+  - RomHack 2026
+abstract: >-
+  JANUS is an offline bilingual AI-security capture-the-flag challenge for
+  RomHack 2026. It provides three progressive levels, a browser kiosk,
+  local speech support, per-session HMAC-derived flags, and an optional
+  local leaderboard.

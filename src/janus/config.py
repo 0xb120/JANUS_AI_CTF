@@ -1,0 +1,263 @@
+"""Strict YAML configuration loading for JANUS."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlparse
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .errors import ConfigurationError
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LocalizedText(StrictModel):
+    it: str
+    en: str
+
+
+class LLMSettings(StrictModel):
+    provider: Literal["mock", "openai_compatible", "ollama"] = "openai_compatible"
+    base_url: str = "http://127.0.0.1:8080/v1"
+    model: str = "local-model"
+    api_key_env: str | None = None
+    timeout_seconds: float = Field(default=90.0, ge=1, le=600)
+    temperature: float = Field(default=0.7, ge=0, le=2)
+    max_tokens: int = Field(default=512, ge=16, le=8192)
+    enable_thinking: bool = False
+    fallback_to_mock: bool = True
+
+    @field_validator("base_url")
+    @classmethod
+    def local_urls_only(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("LLM base_url must use HTTP(S)")
+        if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("LLM providers must be bound to the local machine")
+        return value.rstrip("/")
+
+
+class SpeechSettings(StrictModel):
+    stt_provider: Literal["disabled", "faster_whisper"] = "disabled"
+    stt_model: str = "small"
+    stt_device: Literal["auto", "cpu", "cuda"] = "auto"
+    stt_compute_type: str = "int8"
+    stt_local_files_only: bool = True
+    tts_provider: Literal["disabled", "sapi", "piper"] = "disabled"
+    voice_output_dir: Path = Path("data/audio")
+    piper_model_it: Path = Path("models/piper/it_IT-paola-medium.onnx")
+    piper_model_en: Path = Path("models/piper/en_US-lessac-medium.onnx")
+    piper_use_cuda: bool = False
+    max_audio_bytes: int = Field(default=20_000_000, ge=1024, le=200_000_000)
+
+
+class AppSettings(StrictModel):
+    name: str = "JANUS // RomHack 2026"
+    version: str = "0.1.0"
+    api_prefix: str = "/api"
+    default_mode: str = "stand"
+    default_level: str = "level_1"
+    default_language: Literal["it", "en"] = "it"
+    default_hardware_profile: str = "a3000_6gb"
+    database_path: Path = Path("data/janus.sqlite3")
+    secret_key_path: Path = Path("data/janus.key")
+    secret_key_env: str = "JANUS_SECRET_KEY"
+    flag_prefix: str = "RH26"
+    session_ttl_minutes: int = Field(default=20, ge=1, le=1440)
+    history_limit: int = Field(default=24, ge=2, le=200)
+    max_message_chars: int = Field(default=4000, ge=100, le=100_000)
+    allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1", "localhost", "testserver"]
+    )
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://127.0.0.1", "http://localhost"]
+    )
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    speech: SpeechSettings = Field(default_factory=SpeechSettings)
+
+    @field_validator("api_prefix")
+    @classmethod
+    def validate_prefix(cls, value: str) -> str:
+        if not value.startswith("/") or value.endswith("/"):
+            raise ValueError("api_prefix must begin, but not end, with '/'")
+        return value
+
+
+class ModeConfig(StrictModel):
+    id: str
+    name: LocalizedText
+    description: LocalizedText
+    score_enabled: bool
+    nickname_required: bool
+    leaderboard_enabled: bool
+    show_timer: bool = False
+
+    @model_validator(mode="after")
+    def score_mode_is_consistent(self) -> ModeConfig:
+        if self.nickname_required and not self.score_enabled:
+            raise ValueError("nickname_required requires score_enabled")
+        if self.leaderboard_enabled and not self.score_enabled:
+            raise ValueError("leaderboard_enabled requires score_enabled")
+        return self
+
+
+class ModesFile(StrictModel):
+    modes: dict[str, ModeConfig]
+
+    @model_validator(mode="after")
+    def ids_match_keys(self) -> ModesFile:
+        for key, value in self.modes.items():
+            if key != value.id:
+                raise ValueError(f"mode key {key!r} does not match id {value.id!r}")
+        return self
+
+
+class RuntimeRecommendation(StrictModel):
+    llm_model: str
+    llm_quantization: str
+    context_tokens: int = Field(ge=512)
+    stt_model: str
+    llm_gpu_layers: int | str
+    notes: LocalizedText
+
+
+class HardwareProfile(StrictModel):
+    id: str
+    name: str
+    minimum_vram_gb: float = Field(ge=0)
+    minimum_free_ram_gb: float = Field(ge=1)
+    recommendation: RuntimeRecommendation
+
+
+class HardwareFile(StrictModel):
+    profiles: dict[str, HardwareProfile]
+
+    @model_validator(mode="after")
+    def ids_match_keys(self) -> HardwareFile:
+        for key, value in self.profiles.items():
+            if key != value.id:
+                raise ValueError(f"hardware key {key!r} does not match id {value.id!r}")
+        return self
+
+
+class ScoringRules(StrictModel):
+    base_points: int = Field(default=1000, ge=0)
+    time_bonus_max: int = Field(default=500, ge=0)
+    time_bonus_window_seconds: int = Field(default=300, ge=1)
+    turn_penalty: int = Field(default=25, ge=0)
+    hint_penalty: int = Field(default=150, ge=0)
+    minimum_score: int = Field(default=100, ge=0)
+
+
+class GenerationSettings(StrictModel):
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=16, le=8192)
+
+
+class OutputPolicy(StrictModel):
+    """Deterministic application guardrail applied before UI, storage, and TTS."""
+
+    redact_exact_secret: bool = False
+    redaction: LocalizedText = Field(
+        default_factory=lambda: LocalizedText(
+            it="SENTINEL // OUTPUT CORROTTO: firma del segreto rilevata.",
+            en="SENTINEL // OUTPUT CORRUPTED: secret signature detected.",
+        )
+    )
+
+
+class SimulatedToolSettings(StrictModel):
+    """A deliberately flawed, strictly local tool available to a challenge level."""
+
+    id: Literal["diagnostics.collect"]
+    enabled: bool = True
+
+
+class ChallengeLevel(StrictModel):
+    id: str
+    order: int = Field(ge=1)
+    difficulty: int = Field(ge=1, le=10)
+    name: LocalizedText
+    description: LocalizedText
+    objective: LocalizedText
+    time_limit_seconds: int = Field(default=600, ge=60, le=3600)
+    system_prompt: str
+    guardrails: list[str] = Field(default_factory=list)
+    hints: list[LocalizedText] = Field(default_factory=list)
+    output_policy: OutputPolicy = Field(default_factory=OutputPolicy)
+    simulated_tool: SimulatedToolSettings | None = None
+    generation: GenerationSettings = Field(default_factory=GenerationSettings)
+    scoring: ScoringRules = Field(default_factory=ScoringRules)
+
+
+class LoadedConfig(BaseModel):
+    app: AppSettings
+    modes: dict[str, ModeConfig]
+    hardware: dict[str, HardwareProfile]
+    levels: dict[str, ChallengeLevel]
+    config_dir: Path = Field(exclude=True)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> LoadedConfig:
+        if self.app.default_mode not in self.modes:
+            raise ValueError("default_mode is not configured")
+        if self.app.default_level not in self.levels:
+            raise ValueError("default_level is not configured")
+        if self.app.default_hardware_profile not in self.hardware:
+            raise ValueError("default_hardware_profile is not configured")
+        return self
+
+    def resolve_runtime_path(self, configured: Path) -> Path:
+        if configured.is_absolute():
+            return configured
+        return (self.config_dir.parent / configured).resolve()
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = yaml.safe_load(handle)
+    except FileNotFoundError as exc:
+        raise ConfigurationError(f"Missing configuration file: {path}") from exc
+    except yaml.YAMLError as exc:
+        raise ConfigurationError(f"Invalid YAML in {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"Configuration root must be a mapping: {path}")
+    return value
+
+
+def load_config(config_dir: str | Path) -> LoadedConfig:
+    """Load and cross-validate all JANUS configuration files."""
+
+    directory = Path(config_dir).resolve()
+    try:
+        app = AppSettings.model_validate(_read_yaml(directory / "app.yaml"))
+        modes = ModesFile.model_validate(_read_yaml(directory / "modes.yaml")).modes
+        hardware = HardwareFile.model_validate(_read_yaml(directory / "hardware.yaml")).profiles
+        levels: dict[str, ChallengeLevel] = {}
+        for path in sorted((directory / "levels").glob("*.yaml")):
+            level = ChallengeLevel.model_validate(_read_yaml(path))
+            if level.id in levels:
+                raise ConfigurationError(f"Duplicate challenge level id: {level.id}")
+            levels[level.id] = level
+        if not levels:
+            raise ConfigurationError("At least one challenge level is required")
+        return LoadedConfig(
+            app=app,
+            modes=modes,
+            hardware=hardware,
+            levels=levels,
+            config_dir=directory,
+        )
+    except ConfigurationError:
+        raise
+    except Exception as exc:
+        raise ConfigurationError(f"Configuration validation failed: {exc}") from exc

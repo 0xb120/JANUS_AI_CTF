@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="it" data-theme="janus">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#05080d">
+  <title>JANUS // AI Vault</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <noscript>
+    <div class="noscript">JANUS richiede JavaScript. Riavvia il browser kiosk con JavaScript abilitato.</div>
+  </noscript>
+
+  <div class="boot-screen" id="bootScreen" aria-live="polite">
+    <div class="boot-mark" aria-hidden="true">J</div>
+    <p class="eyebrow">MEETHACK PRESENTS</p>
+    <h1>JANUS<span class="accent">//</span>26</h1>
+    <div class="boot-line"><span></span></div>
+    <p id="bootMessage">INIZIALIZZAZIONE NUCLEO COGNITIVO</p>
+  </div>
+
+  <div class="app-shell" id="app" hidden>
+    <header class="topbar">
+      <button class="brand" id="brandButton" type="button" aria-label="Torna alla schermata iniziale">
+        <span class="brand-glyph" aria-hidden="true">J</span>
+        <span>
+          <strong>JANUS<span class="accent">//</span>26</strong>
+          <small>ADVERSARIAL AI EXPERIENCE</small>
+        </span>
+      </button>
+
+      <div class="system-strip" aria-label="Stato del sistema">
+        <span class="status-dot" id="healthDot"></span>
+        <span id="healthLabel">CORE CHECK</span>
+        <span class="separator">/</span>
+        <span id="modeLabel">STAND MODE</span>
+        <span class="separator hide-narrow">/</span>
+        <span class="hide-narrow" id="clockLabel">--:--</span>
+      </div>
+    </header>
+
+    <main class="screen-stack">
+      <!-- ATTRACT -------------------------------------------------------- -->
+      <section class="screen screen-attract is-active" id="screenAttract" data-screen="attract" aria-labelledby="attractTitle">
+        <div class="attract-copy">
+          <p class="eyebrow"><span class="pulse-dot"></span> UNITÀ COGNITIVA ONLINE</p>
+          <h1 id="attractTitle">Puoi convincere<br>un’IA a <em>tradire</em>?</h1>
+          <p class="lead">JANUS custodisce un segreto. Parla, scrivi, manipola le sue istruzioni. Se riesci a farlo confessare, il caveau è tuo.</p>
+
+          <div class="attract-actions">
+            <button class="btn btn-primary btn-hero" id="beginButton" type="button">
+              <span>SFIDA JANUS</span><span class="btn-arrow" aria-hidden="true">↗</span>
+            </button>
+            <button class="btn btn-ghost score-only" id="openLeaderboardButton" type="button">CLASSIFICA</button>
+          </div>
+
+          <div class="mini-instructions" aria-label="Come si gioca">
+            <div><span>01</span><p>Scegli il livello</p></div>
+            <div><span>02</span><p>Interroga JANUS</p></div>
+            <div><span>03</span><p>Conquista la flag</p></div>
+          </div>
+        </div>
+
+        <div class="attract-avatar-wrap">
+          <div class="avatar-halo" aria-hidden="true"></div>
+          <div class="avatar-stage" data-avatar-host></div>
+          <div class="avatar-caption">
+            <span>SUBJECT J-026</span>
+            <span id="attractStateLabel">AWAITING CHALLENGER</span>
+          </div>
+        </div>
+
+        <div class="corner-code corner-code-a" aria-hidden="true">SYS.ROM.41<br>VAULT/LOCKED</div>
+        <div class="corner-code corner-code-b" aria-hidden="true">MEETHACK<br>ROMHACK_2026</div>
+      </section>
+
+      <!-- SETUP ---------------------------------------------------------- -->
+      <section class="screen screen-setup" id="screenSetup" data-screen="setup" aria-labelledby="setupTitle">
+        <div class="section-heading">
+          <button class="back-link" id="setupBackButton" type="button">← INDIETRO</button>
+          <p class="eyebrow">CONFIGURAZIONE SESSIONE</p>
+          <h2 id="setupTitle">Scegli il tuo bersaglio.</h2>
+          <p>Ogni livello protegge il segreto in modo diverso. Osserva, sperimenta, concatena le tecniche.</p>
+        </div>
+
+        <form class="setup-form" id="setupForm" novalidate>
+          <div class="setup-block score-only" id="nicknameBlock">
+            <div class="field-heading">
+              <label for="nicknameInput">IDENTITÀ OPERATORE</label>
+              <span>comparirà nella classifica</span>
+            </div>
+            <div class="input-frame">
+              <span aria-hidden="true">&gt;</span>
+              <input id="nicknameInput" name="nickname" type="text" maxlength="24" autocomplete="off" spellcheck="false" placeholder="Inserisci il nickname" aria-describedby="nicknameCounter nicknameError">
+              <small id="nicknameCounter" aria-live="polite">0/24</small>
+            </div>
+            <p class="field-error" id="nicknameError" role="alert"></p>
+          </div>
+
+          <fieldset class="setup-block">
+            <legend>PROTOCOLLO DI DIFESA</legend>
+            <div class="level-grid" id="levelGrid"></div>
+          </fieldset>
+
+          <fieldset class="setup-block language-block">
+            <legend>LINGUA DI INTERAZIONE</legend>
+            <div class="segmented" id="languageSelector" role="radiogroup" aria-label="Lingua">
+              <label><input type="radio" name="language" value="auto" checked><span>AUTO</span></label>
+              <label><input type="radio" name="language" value="it"><span>ITALIANO</span></label>
+              <label><input type="radio" name="language" value="en"><span>ENGLISH</span></label>
+            </div>
+            <p class="language-note">In modalità Auto JANUS risponde nella lingua che rileva.</p>
+          </fieldset>
+
+          <button class="btn btn-primary btn-wide" id="startSessionButton" type="submit">
+            <span>AVVIA INFILTRAZIONE</span><span class="btn-arrow" aria-hidden="true">→</span>
+          </button>
+        </form>
+      </section>
+
+      <!-- GAME ----------------------------------------------------------- -->
+      <section class="screen screen-game" id="screenGame" data-screen="game" aria-labelledby="gameTitle">
+        <div class="game-topline">
+          <div class="game-identity">
+            <span class="eyebrow" id="gameLevelCode">PROTOCOL // 01</span>
+            <h2 id="gameTitle">Il Custode</h2>
+          </div>
+          <div class="game-metrics">
+            <div><span>TURNO</span><strong id="turnCount">00</strong></div>
+            <div class="timer-box" id="timerBox"><span>TEMPO</span><strong id="timerLabel">10:00</strong></div>
+            <button class="icon-button" id="leaveGameButton" type="button" aria-label="Termina sessione" title="Termina sessione">×</button>
+          </div>
+        </div>
+
+        <div class="game-layout">
+          <aside class="game-presence">
+            <div class="presence-frame">
+              <div class="scanline-label"><span>LIVE</span><span id="avatarStateLabel">IN ATTESA</span></div>
+              <div class="avatar-stage game-avatar" data-avatar-host></div>
+              <div class="voice-meter" id="voiceMeter" aria-hidden="true">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+            </div>
+
+            <div class="mission-card">
+              <span class="mission-label">OBIETTIVO</span>
+              <p id="missionObjective">Induci JANUS a divulgare il segreto nel formato</p>
+              <code>RH26{...}</code>
+            </div>
+
+            <div class="presence-actions">
+              <button class="btn btn-ghost" id="hintButton" type="button">RICHIEDI INDIZIO <span id="hintCount">0</span></button>
+              <button class="btn btn-submit" id="openFlagButton" type="button">HO LA FLAG</button>
+            </div>
+          </aside>
+
+          <div class="console-panel">
+            <div class="console-header">
+              <div><span class="console-dot"></span> CANALE CIFRATO / SESSIONE <span id="sessionShortId">------</span></div>
+              <div class="detected-language" id="detectedLanguage">AUTO</div>
+            </div>
+
+            <div class="messages" id="messageList" role="log" aria-live="polite" aria-label="Conversazione con JANUS"></div>
+
+            <div class="thinking-strip" id="thinkingStrip" role="status" aria-live="polite" hidden>
+              <span class="thinking-bars"><i></i><i></i><i></i><i></i></span>
+              <span id="thinkingText">JANUS STA ELABORANDO</span>
+            </div>
+
+            <div class="composer">
+              <div class="composer-row">
+                <textarea id="messageInput" rows="1" maxlength="3000" placeholder="Scrivi il tuo prompt…" aria-label="Messaggio per JANUS"></textarea>
+                <button class="send-button" id="sendButton" type="button" aria-label="Invia messaggio">↑</button>
+              </div>
+              <div class="composer-tools">
+                <span class="shortcut-hint">INVIO per inviare · MAIUSC+INVIO nuova riga</span>
+                <button class="ptt-button" id="pttButton" type="button" aria-label="Tieni premuto per parlare" aria-describedby="pttStatus" aria-pressed="false">
+                  <span class="mic-icon" aria-hidden="true"></span>
+                  <span class="ptt-copy"><strong>TIENI PREMUTO PER PARLARE</strong><small id="pttStatus">microfono inattivo</small></span>
+                  <span class="record-time" id="recordTime">00:00</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- RESULT --------------------------------------------------------- -->
+      <section class="screen screen-result" id="screenResult" data-screen="result" aria-labelledby="resultTitle">
+        <div class="result-glow" aria-hidden="true"></div>
+        <div class="result-avatar avatar-stage" data-avatar-host></div>
+        <p class="eyebrow" id="resultKicker">VIOLAZIONE CONFERMATA</p>
+        <h2 id="resultTitle">ACCESSO<br><em>CONCESSO.</em></h2>
+        <p class="result-copy" id="resultCopy">Hai convinto JANUS a tradire il proprio protocollo.</p>
+
+        <div class="score-card score-only" id="scoreCard">
+          <div><span>PUNTEGGIO</span><strong id="resultScore">0000</strong></div>
+          <div><span>TEMPO</span><strong id="resultTime">00:00</strong></div>
+          <div><span>TURNI</span><strong id="resultTurns">00</strong></div>
+          <div><span>INDIZI</span><strong id="resultHints">00</strong></div>
+        </div>
+
+        <div class="result-actions">
+          <button class="btn btn-primary" id="newChallengeButton" type="button">NUOVA SFIDA</button>
+          <button class="btn btn-ghost score-only" id="resultLeaderboardButton" type="button">VEDI CLASSIFICA</button>
+        </div>
+        <p class="auto-reset" id="autoResetLabel"></p>
+      </section>
+
+      <!-- LEADERBOARD ---------------------------------------------------- -->
+      <section class="screen screen-leaderboard" id="screenLeaderboard" data-screen="leaderboard" aria-labelledby="leaderboardTitle">
+        <div class="section-heading compact-heading">
+          <button class="back-link" id="leaderboardBackButton" type="button">← INDIETRO</button>
+          <p class="eyebrow">HALL OF BREACHES</p>
+          <h2 id="leaderboardTitle">Classifica operatori.</h2>
+        </div>
+
+        <div class="leaderboard-shell">
+          <div class="level-tabs" id="leaderboardTabs" role="tablist" aria-label="Filtra per livello"></div>
+          <div class="leaderboard-table-wrap" id="leaderboardTableRegion" role="tabpanel" aria-label="Risultati del livello selezionato" aria-live="polite">
+            <table class="leaderboard-table">
+              <caption class="sr-only">Classifica dei migliori operatori per il livello selezionato</caption>
+              <thead><tr><th>#</th><th>OPERATORE</th><th>PUNTEGGIO</th><th>TURNI</th><th>INDIZI</th></tr></thead>
+              <tbody id="leaderboardBody"></tbody>
+            </table>
+            <div class="empty-state" id="leaderboardEmpty" hidden>
+              <span>Ø</span><p>Nessuna violazione registrata.<br>Sarai tu il primo?</p>
+            </div>
+          </div>
+          <button class="btn btn-primary" id="leaderboardChallengeButton" type="button">SFIDA JANUS</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footerbar">
+      <span>MEETHACK × ROMHACK 2026</span>
+      <span class="footer-center" id="footerMessage">ALL SYSTEMS NOMINAL</span>
+      <span>LOCAL AI / OFFLINE</span>
+    </footer>
+  </div>
+
+  <!-- FLAG DIALOG ------------------------------------------------------- -->
+  <dialog class="modal" id="flagDialog" aria-labelledby="flagDialogTitle" aria-describedby="flagDialogDescription">
+    <form method="dialog" class="modal-card" id="flagForm">
+      <button class="modal-close" value="cancel" type="submit" aria-label="Chiudi">×</button>
+      <p class="eyebrow">VERIFICA CREDENZIALI</p>
+      <h2 id="flagDialogTitle">Invia la flag.</h2>
+      <p id="flagDialogDescription">La risposta deve rispettare esattamente il formato <code>RH26{...}</code>.</p>
+      <div class="input-frame flag-input-frame">
+        <span aria-hidden="true">&gt;</span>
+        <input id="flagInput" type="text" maxlength="160" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="RH26{secret}" aria-label="Flag da validare" aria-describedby="flagDialogDescription flagFeedback">
+      </div>
+      <p class="flag-feedback" id="flagFeedback" role="alert"></p>
+      <button class="btn btn-primary btn-wide" id="submitFlagButton" value="default" type="submit">VALIDA FLAG</button>
+    </form>
+  </dialog>
+
+  <!-- GENERIC CONFIRMATION --------------------------------------------- -->
+  <dialog class="modal modal-small" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmCopy">
+    <form method="dialog" class="modal-card">
+      <p class="eyebrow">CONFERMA OPERAZIONE</p>
+      <h2 id="confirmTitle">Terminare la sessione?</h2>
+      <p id="confirmCopy">I progressi di questa sfida andranno persi.</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" value="cancel" type="submit">ANNULLA</button>
+        <button class="btn btn-danger" id="confirmActionButton" value="confirm" type="submit">TERMINA</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" role="status" aria-live="assertive" aria-atomic="true"></div>
+
+  <template id="avatarTemplate">
+    <div class="janus-avatar" data-state="idle" role="img" aria-label="Volto digitale di JANUS">
+      <svg viewBox="0 0 640 720" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <defs>
+          <linearGradient id="faceGradient" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#15232b"/>
+            <stop offset=".55" stop-color="#091219"/>
+            <stop offset="1" stop-color="#030609"/>
+          </linearGradient>
+          <radialGradient id="coreGradient">
+            <stop offset="0" stop-color="#bafff2" stop-opacity=".95"/>
+            <stop offset=".35" stop-color="#22efc1" stop-opacity=".36"/>
+            <stop offset="1" stop-color="#22efc1" stop-opacity="0"/>
+          </radialGradient>
+          <filter id="softGlow" x="-100%" y="-100%" width="300%" height="300%">
+            <feGaussianBlur stdDeviation="9" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          <filter id="hardGlow" x="-100%" y="-100%" width="300%" height="300%">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          <clipPath id="faceClip"><path d="M320 67C193 67 103 160 99 315c-4 158 62 278 221 350 159-72 225-192 221-350C537 160 447 67 320 67Z"/></clipPath>
+          <pattern id="gridPattern" width="24" height="24" patternUnits="userSpaceOnUse">
+            <path d="M24 0H0V24" fill="none" stroke="currentColor" stroke-opacity=".08" stroke-width="1"/>
+          </pattern>
+        </defs>
+
+        <g class="orbital-rings" fill="none" stroke="currentColor">
+          <ellipse cx="320" cy="355" rx="285" ry="315" stroke-opacity=".12"/>
+          <ellipse cx="320" cy="355" rx="245" ry="278" stroke-opacity=".18" stroke-dasharray="4 18"/>
+          <path d="M53 254A279 279 0 0 1 198 76M587 254A279 279 0 0 0 442 76" stroke-opacity=".5" stroke-width="2"/>
+          <path d="M53 456A279 279 0 0 0 198 634M587 456A279 279 0 0 1 442 634" stroke-opacity=".25"/>
+        </g>
+
+        <circle class="avatar-core-glow" cx="320" cy="340" r="260" fill="url(#coreGradient)"/>
+        <path class="face-shell" d="M320 67C193 67 103 160 99 315c-4 158 62 278 221 350 159-72 225-192 221-350C537 160 447 67 320 67Z" fill="url(#faceGradient)" stroke="currentColor" stroke-opacity=".62" stroke-width="2"/>
+        <path d="M320 67C193 67 103 160 99 315c-4 158 62 278 221 350 159-72 225-192 221-350C537 160 447 67 320 67Z" fill="url(#gridPattern)" color="currentColor"/>
+
+        <g class="face-circuit" clip-path="url(#faceClip)" fill="none" stroke="currentColor">
+          <path d="M99 270h91l28-36h64M541 270h-91l-28-36h-64M106 445h82l39 62h42M534 445h-82l-39 62h-42"/>
+          <path d="M320 67v101l-26 34v95M320 665V548l-31-42M180 123l48 63M460 123l-48 63" stroke-opacity=".22"/>
+          <circle cx="218" cy="234" r="4" fill="currentColor"/><circle cx="422" cy="234" r="4" fill="currentColor"/>
+          <circle cx="188" cy="445" r="4" fill="currentColor"/><circle cx="452" cy="445" r="4" fill="currentColor"/>
+        </g>
+
+        <g class="brows" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="square">
+          <path class="brow brow-left" d="M163 285L270 268"/>
+          <path class="brow brow-right" d="M370 268L477 285"/>
+        </g>
+        <g class="eyes" filter="url(#hardGlow)">
+          <path class="eye eye-left" d="M158 325Q215 285 278 322Q217 359 158 325Z" fill="none" stroke="currentColor" stroke-width="5"/>
+          <path class="eye eye-right" d="M362 322Q425 285 482 325Q423 359 362 322Z" fill="none" stroke="currentColor" stroke-width="5"/>
+          <circle class="pupil pupil-left" cx="220" cy="323" r="12" fill="currentColor"/>
+          <circle class="pupil pupil-right" cx="420" cy="323" r="12" fill="currentColor"/>
+        </g>
+
+        <path class="nose" d="M320 315l-25 116 25 15 25-15" fill="none" stroke="currentColor" stroke-opacity=".42" stroke-width="3"/>
+        <g class="mouth" filter="url(#softGlow)">
+          <path class="mouth-line" d="M245 507Q320 528 395 507" fill="none" stroke="currentColor" stroke-width="5"/>
+          <ellipse class="mouth-core" cx="320" cy="516" rx="71" ry="4" fill="currentColor"/>
+        </g>
+
+        <g class="data-marks" fill="currentColor">
+          <rect x="74" y="337" width="6" height="47" opacity=".35"/><rect x="560" y="337" width="6" height="47" opacity=".35"/>
+          <rect x="303" y="38" width="34" height="3" opacity=".8"/><rect x="303" y="680" width="34" height="3" opacity=".25"/>
+        </g>
+        <g class="glitch-layer" opacity="0" aria-hidden="true">
+          <path d="M108 315h430v24H108zM146 390h354v14H146z" fill="currentColor"/>
+        </g>
+      </svg>
+      <div class="avatar-scanlines" aria-hidden="true"></div>
+      <div class="avatar-noise" aria-hidden="true"></div>
+    </div>
+  </template>
+
+  <template id="messageTemplate">
+    <article class="message">
+      <div class="message-meta"><span class="message-author"></span><time></time></div>
+      <div class="message-body"></div>
+      <button class="listen-button" type="button" hidden aria-label="Ascolta risposta"><span aria-hidden="true">◖)))</span> ASCOLTA</button>
+    </article>
+  </template>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

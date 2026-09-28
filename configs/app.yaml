@@ -1,0 +1,43 @@
+name: "JANUS // RomHack 2026"
+version: "0.1.0"
+api_prefix: "/api"
+default_mode: "stand"
+default_level: "level_1"
+default_language: "it"
+default_hardware_profile: "a3000_6gb"
+database_path: "data/janus.sqlite3"
+secret_key_path: "data/janus.key"
+secret_key_env: "JANUS_SECRET_KEY"
+flag_prefix: "RH26"
+session_ttl_minutes: 20
+history_limit: 24
+max_message_chars: 4000
+allowed_hosts:
+  - "127.0.0.1"
+  - "localhost"
+  - "testserver"
+cors_origins:
+  - "http://127.0.0.1"
+  - "http://localhost"
+llm:
+  provider: "ollama"
+  base_url: "http://127.0.0.1:11434"
+  model: "qwen3:4b-instruct"
+  api_key_env: null
+  timeout_seconds: 90
+  temperature: 0.7
+  max_tokens: 384
+  enable_thinking: false
+  fallback_to_mock: false
+speech:
+  stt_provider: "faster_whisper"
+  stt_model: "small"
+  stt_device: "cpu"
+  stt_compute_type: "int8"
+  stt_local_files_only: true
+  tts_provider: "piper"
+  voice_output_dir: "data/audio"
+  piper_model_it: "models/piper/it_IT-paola-medium.onnx"
+  piper_model_en: "models/piper/en_US-lessac-medium.onnx"
+  piper_use_cuda: false
+  max_audio_bytes: 20000000

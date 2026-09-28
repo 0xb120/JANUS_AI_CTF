@@ -1,0 +1,15 @@
+JANUS — Offline Bilingual AI Security CTF
+Copyright 2026 JANUS contributors
+
+Original project:
+https://github.com/Redragon948/JANUS_AI_CTF
+
+This product includes software developed for the JANUS project and the
+RomHack 2026 community event. Redistributions and derivative works must retain
+the applicable copyright, license, and attribution notices as required by the
+Apache License, Version 2.0.
+
+JANUS does not redistribute third-party LLM weights, Whisper models, Piper
+voices, or Ollama. Those components remain subject to their respective licenses
+and terms.
+

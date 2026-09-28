@@ -1,0 +1,43 @@
+profiles:
+  a3000_6gb:
+    id: "a3000_6gb"
+    name: "RTX A3000 Laptop 6 GB"
+    minimum_vram_gb: 5.5
+    minimum_free_ram_gb: 16
+    recommendation:
+      llm_model: "Qwen3 4B Instruct"
+      llm_quantization: "GGUF Q5_K_M, full GPU offload"
+      context_tokens: 4096
+      stt_model: "faster-whisper small, CPU int8"
+      llm_gpu_layers: "auto"
+      notes:
+        it: "Profilo principale stabile: LLM sulla GPU, STT e TTS sulla CPU; l'8B ibrido resta opzionale dopo benchmark."
+        en: "Stable primary profile: LLM on GPU, STT and TTS on CPU; hybrid 8B remains optional after benchmarking."
+  reduced_4gb:
+    id: "reduced_4gb"
+    name: "GPU 4 GB / RAM 16 GB"
+    minimum_vram_gb: 3.5
+    minimum_free_ram_gb: 10
+    recommendation:
+      llm_model: "Qwen3 4B Instruct"
+      llm_quantization: "GGUF Q4_K_M"
+      context_tokens: 3072
+      stt_model: "faster-whisper base, CPU int8"
+      llm_gpu_layers: "auto"
+      notes:
+        it: "Profilo ridotto con contesto più corto; conserva l'esperienza bilingue e la voce."
+        en: "Reduced profile with a shorter context; preserves bilingual text and voice gameplay."
+  cpu_fallback:
+    id: "cpu_fallback"
+    name: "CPU fallback"
+    minimum_vram_gb: 0
+    minimum_free_ram_gb: 8
+    recommendation:
+      llm_model: "Qwen3 1.7B or 4B Instruct"
+      llm_quantization: "GGUF Q4_K_M, CPU"
+      context_tokens: 2048
+      stt_model: "faster-whisper tiny or base, CPU int8"
+      llm_gpu_layers: 0
+      notes:
+        it: "Modalità di continuità operativa: latenza e qualità inferiori, interfaccia invariata."
+        en: "Continuity fallback: lower quality and higher latency, with the same interface."
