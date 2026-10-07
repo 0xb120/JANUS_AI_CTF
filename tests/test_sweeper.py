@@ -199,3 +199,31 @@ def test_prune_locks_keeps_session_lock_with_pending_waiter(
         assert await task is lock
 
     asyncio.run(scenario())
+
+
+def test_one_failing_session_does_not_abort_the_sweep(
+    loaded_config, repository, flag_service, caplog
+):
+    engine = _engine(loaded_config, repository, flag_service)
+    for session_id in ("broken", "ghost"):
+        repository.create_session(
+            SessionRecord(
+                id=session_id, mode_id="score", level_id="level_1", nickname="Ada",
+                started_at=utc_now() - timedelta(hours=2),
+            )
+        )
+    real_expire = engine.expire_if_due
+
+    async def flaky_expire(session_id):
+        if session_id == "broken":
+            raise RuntimeError("disk hiccup")
+        return await real_expire(session_id)
+
+    engine.expire_if_due = flaky_expire
+
+    with caplog.at_level("ERROR", logger="janus.sweeper"):
+        report = asyncio.run(SessionSweeper(engine, rate_limiter=RateLimiter()).sweep_once())
+
+    assert report.expired == 1
+    assert repository.get_session("ghost").status is SessionStatus.EXPIRED
+    assert any("broken" in record.getMessage() for record in caplog.records)

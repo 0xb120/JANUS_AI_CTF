@@ -41,7 +41,13 @@ class SessionSweeper:
     async def sweep_once(self) -> SweepReport:
         report = SweepReport()
         for session_id in self.engine.repository.active_session_ids():
-            if await self.engine.expire_if_due(session_id):
+            try:
+                expired = await self.engine.expire_if_due(session_id)
+            except Exception:
+                # One bad session must not stop the rest of the pass; retried next interval.
+                logger.exception("Could not expire session %s", session_id)
+                continue
+            if expired:
                 report.expired += 1
         report.locks_pruned = self.engine.prune_locks()
         report.audio_removed = self.engine.sweep_orphan_audio(self.audio_max_age_seconds)
