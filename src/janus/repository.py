@@ -292,6 +292,26 @@ class SQLiteRepository:
         if cursor.rowcount == 0:
             raise NotFoundError("Session not found")
 
+    def delete_message(self, message_id: int) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+            connection.commit()
+        finally:
+            self._close(connection)
+
+    def decrement_turn(self, session_id: str) -> SessionRecord:
+        connection = self._connect()
+        try:
+            connection.execute(
+                "UPDATE sessions SET turn_count = MAX(turn_count - 1, 0) WHERE id = ?",
+                (session_id,),
+            )
+            connection.commit()
+        finally:
+            self._close(connection)
+        return self.get_session(session_id)
+
     def delete_messages(self, session_id: str) -> None:
         connection = self._connect()
         try:

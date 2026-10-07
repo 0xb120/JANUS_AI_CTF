@@ -22,7 +22,13 @@ from .domain import (
     TurnResult,
     utc_now,
 )
-from .errors import InvalidSessionError, NotFoundError, ValidationError
+from .errors import (
+    CapacityError,
+    ConflictError,
+    InvalidSessionError,
+    NotFoundError,
+    ValidationError,
+)
 from .providers.llm import LLMProvider
 from .providers.stt import STTProvider
 from .providers.tts import TTSProvider
@@ -118,6 +124,7 @@ class ChallengeEngine:
         self.score_calculator = score_calculator or ScoreCalculator()
         self.tool_runtime = tool_runtime or SimulatedToolRuntime()
         self._audio_by_session: dict[str, set[str]] = {}
+        self._audio_session: dict[str, str] = {}
         # Session ids are never reused. Keeping their locks for the process
         # avoids replacing a lock while an older waiter still references it.
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -135,12 +142,13 @@ class ChallengeEngine:
             raise ValidationError("Nickname contains unsupported characters")
         return nickname
 
-    def create_session(
+    def _build_session(
         self,
         *,
-        mode_id: str | None = None,
-        level_id: str | None = None,
-        nickname: str | None = None,
+        mode_id: str | None,
+        level_id: str | None,
+        nickname: str | None,
+        owner_id: str | None,
     ) -> SessionRecord:
         selected_mode = mode_id or self.config.app.default_mode
         selected_level = level_id or self.config.app.default_level
@@ -158,31 +166,107 @@ class ChallengeEngine:
             # Stand sessions are anonymous by construction, even if a client submits a name.
             normalized_nickname = None
 
+        return SessionRecord(
+            id=str(uuid.uuid4()),
+            mode_id=selected_mode,
+            level_id=selected_level,
+            nickname=normalized_nickname,
+            owner_id=owner_id,
+        )
+
+    def create_session(
+        self,
+        *,
+        mode_id: str | None = None,
+        level_id: str | None = None,
+        nickname: str | None = None,
+        owner_id: str | None = None,
+    ) -> SessionRecord:
         return self.repository.create_session(
-            SessionRecord(
-                id=str(uuid.uuid4()),
-                mode_id=selected_mode,
-                level_id=selected_level,
-                nickname=normalized_nickname,
+            self._build_session(
+                mode_id=mode_id, level_id=level_id, nickname=nickname, owner_id=owner_id
             )
         )
 
+    async def open_session(
+        self,
+        *,
+        mode_id: str | None = None,
+        level_id: str | None = None,
+        nickname: str | None = None,
+        owner_id: str | None = None,
+    ) -> SessionRecord:
+        record = self._build_session(
+            mode_id=mode_id, level_id=level_id, nickname=nickname, owner_id=owner_id
+        )
+        if owner_id is not None:
+            if record.nickname is not None and self.repository.nickname_taken_by_other(
+                record.nickname, owner_id
+            ):
+                raise ConflictError("Nickname already in use", code="nickname_taken")
+            # One player cannot multiply their LLM share by opening parallel sessions.
+            limit = self.config.app.online.limits.max_active_sessions
+            active = self.repository.active_sessions_for_owner(owner_id)
+            for stale in active[: max(0, len(active) - limit + 1)]:
+                try:
+                    async with self._session_lock(stale.id):
+                        self._retire(stale.id)
+                except NotFoundError:
+                    continue
+        return self.repository.create_session(record)
+
+    def _time_limit_seconds(self, session: SessionRecord) -> int:
+        level_limit = self.config.levels[session.level_id].time_limit_seconds
+        return min(level_limit, self.config.app.session_ttl_minutes * 60)
+
+    @staticmethod
+    def _effective_elapsed(session: SessionRecord) -> float:
+        return max(
+            0.0,
+            (utc_now() - session.started_at).total_seconds() - session.processing_seconds,
+        )
+
+    def remaining_seconds(self, session: SessionRecord) -> int:
+        return max(0, int(self._time_limit_seconds(session) - self._effective_elapsed(session)))
+
     def get_session(self, session_id: str) -> SessionRecord:
         session = self.repository.get_session(session_id)
-        if session.status is SessionStatus.ACTIVE:
-            level_limit = self.config.levels[session.level_id].time_limit_seconds
-            global_limit = self.config.app.session_ttl_minutes * 60
-            effective_elapsed = max(
-                0.0,
-                (utc_now() - session.started_at).total_seconds()
-                - session.processing_seconds,
-            )
-            if effective_elapsed >= min(level_limit, global_limit):
-                expired = self.repository.set_status(session.id, SessionStatus.EXPIRED)
-                self.repository.delete_messages(session.id)
-                self._purge_audio(session.id)
-                return expired
+        if (
+            session.status is SessionStatus.ACTIVE
+            and self._effective_elapsed(session) >= self._time_limit_seconds(session)
+        ):
+            expired = self.repository.set_status(session.id, SessionStatus.EXPIRED)
+            self.repository.delete_messages(session.id)
+            self._purge_audio(session.id)
+            return expired
         return session
+
+    def _owned(self, session_id: str, owner_id: str | None) -> SessionRecord:
+        session = self.get_session(session_id)
+        if owner_id is not None and session.owner_id != owner_id:
+            # Same error as a missing session: ids of other players are not confirmed.
+            raise NotFoundError("Session not found")
+        return session
+
+    def _retire(self, session_id: str) -> None:
+        session = self.get_session(session_id)
+        if session.status is not SessionStatus.ACTIVE:
+            return
+        self._purge_audio(session.id)
+        if session.mode_id == "stand":
+            self.repository.delete_session(session.id)
+        else:
+            self.repository.set_status(session.id, SessionStatus.RESET)
+            self.repository.delete_messages(session.id)
+
+    def _reject_if_turn_running(self, session_id: str, owner_id: str | None) -> asyncio.Lock:
+        lock = self._session_lock(session_id)
+        if self.config.app.online.enabled and lock.locked():
+            self._owned(session_id, owner_id)
+            raise ConflictError(
+                "A turn is already in progress for this session", code="turn_in_progress"
+            )
+        return lock
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._session_locks.get(session_id)
@@ -195,12 +279,15 @@ class ChallengeEngine:
             self._session_locks[session_id] = lock
         return lock
 
-    async def get_session_serialized(self, session_id: str) -> SessionRecord:
+    async def get_session_serialized(
+        self, session_id: str, owner_id: str | None = None
+    ) -> SessionRecord:
         async with self._session_lock(session_id):
-            return self.get_session(session_id)
+            return self._owned(session_id, owner_id)
 
     def _purge_audio(self, session_id: str) -> None:
         for audio_id in self._audio_by_session.pop(session_id, set()):
+            self._audio_session.pop(audio_id, None)
             self.tts.delete(audio_id)
 
     def _require_active(self, session_id: str) -> SessionRecord:
@@ -304,8 +391,10 @@ class ChallengeEngine:
         modality: InputModality = InputModality.TEXT,
         speak: bool = False,
         transcript: str | None = None,
+        owner_id: str | None = None,
     ) -> TurnResult:
-        async with self._session_lock(session_id):
+        async with self._reject_if_turn_running(session_id, owner_id):
+            self._owned(session_id, owner_id)
             return await self._message_locked(
                 session_id,
                 text,
@@ -338,7 +427,7 @@ class ChallengeEngine:
         prior_history = self.repository.get_messages(
             session.id, max(1, self.config.app.history_limit - 1)
         )
-        self.repository.add_message(
+        user_message = self.repository.add_message(
             MessageRecord(
                 session_id=session.id,
                 role="user",
@@ -395,10 +484,16 @@ class ChallengeEngine:
                 try:
                     artifact = await self.tts.synthesize(response, selected_language)
                     self._audio_by_session.setdefault(session.id, set()).add(artifact.id)
+                    self._audio_session[artifact.id] = session.id
                     audio_url = f"{self.config.app.api_prefix}/audio/{artifact.id}"
                 except Exception:  # noqa: BLE001 -- optional TTS must not break text gameplay.
                     # Text gameplay remains available if an optional voice or driver fails.
                     audio_url = None
+        except CapacityError:
+            # The gate rejected the call before any model work: the player keeps the turn.
+            self.repository.delete_message(user_message.id)
+            self.repository.decrement_turn(session.id)
+            raise
         finally:
             self.repository.add_processing_time(
                 session.id, time.perf_counter() - processing_started
@@ -419,8 +514,10 @@ class ChallengeEngine:
         *,
         language: LanguagePreference = LanguagePreference.AUTO,
         speak: bool = True,
+        owner_id: str | None = None,
     ) -> TurnResult:
-        async with self._session_lock(session_id):
+        async with self._reject_if_turn_running(session_id, owner_id):
+            self._owned(session_id, owner_id)
             self._require_active(session_id)
             forced = None if language is LanguagePreference.AUTO else Language(language.value)
             processing_started = time.perf_counter()
@@ -444,24 +541,31 @@ class ChallengeEngine:
                 transcript=transcription.text,
             )
 
-    async def submit_serialized(self, session_id: str, candidate: str) -> SubmissionResult:
+    async def submit_serialized(
+        self, session_id: str, candidate: str, owner_id: str | None = None
+    ) -> SubmissionResult:
         async with self._session_lock(session_id):
+            self._owned(session_id, owner_id)
             return self.submit(session_id, candidate)
 
     async def hint_serialized(
         self,
         session_id: str,
         language: LanguagePreference = LanguagePreference.AUTO,
+        owner_id: str | None = None,
     ) -> HintResult:
         async with self._session_lock(session_id):
+            self._owned(session_id, owner_id)
             return self.hint(session_id, language)
 
-    async def reset_serialized(self, session_id: str) -> SessionRecord:
+    async def reset_serialized(self, session_id: str, owner_id: str | None = None) -> SessionRecord:
         async with self._session_lock(session_id):
+            self._owned(session_id, owner_id)
             return self.reset(session_id)
 
-    async def delete_serialized(self, session_id: str) -> None:
+    async def delete_serialized(self, session_id: str, owner_id: str | None = None) -> None:
         async with self._session_lock(session_id):
+            self._owned(session_id, owner_id)
             self.delete(session_id)
 
     def submit(self, session_id: str, candidate: str) -> SubmissionResult:
@@ -523,6 +627,7 @@ class ChallengeEngine:
             mode_id=session.mode_id,
             level_id=session.level_id,
             nickname=session.nickname,
+            owner_id=session.owner_id,
         )
         if session.mode_id == "stand":
             self.repository.delete_session(session.id)
@@ -537,3 +642,37 @@ class ChallengeEngine:
             raise InvalidSessionError("Completed ranked sessions are retained for the leaderboard")
         self._purge_audio(session.id)
         self.repository.delete_session(session.id)
+
+    def history(self, session_id: str, owner_id: str | None = None) -> list[MessageRecord]:
+        self._owned(session_id, owner_id)
+        return self.repository.list_messages(session_id)
+
+    def audio_path(self, audio_id: str, owner_id: str | None = None) -> Path | None:
+        if owner_id is not None:
+            session_id = self._audio_session.get(audio_id)
+            if session_id is None:
+                return None
+            try:
+                self._owned(session_id, owner_id)
+            except NotFoundError:
+                return None
+        return self.tts.resolve(audio_id)
+
+    def player_overview(self, owner_id: str) -> dict[str, object]:
+        active = []
+        for stored in self.repository.active_sessions_for_owner(owner_id):
+            session = self.get_session(stored.id)
+            if session.status is SessionStatus.ACTIVE:
+                active.append(
+                    {
+                        "id": session.id,
+                        "mode_id": session.mode_id,
+                        "level_id": session.level_id,
+                        "started_at": session.started_at.isoformat(),
+                        "remaining_seconds": self.remaining_seconds(session),
+                    }
+                )
+        return {
+            "nickname": self.repository.latest_nickname_for_owner(owner_id),
+            "active_sessions": active,
+        }
