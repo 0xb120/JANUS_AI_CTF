@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import tempfile
+import time
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -15,9 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import LoadedConfig, load_config
-from .domain import LanguagePreference, SessionRecord
+from .domain import LanguagePreference, SessionRecord, utc_now
 from .engine import ChallengeEngine
-from .errors import JanusError, NotFoundError, ValidationError
+from .errors import JanusError, NotFoundError, UnauthorizedError, ValidationError
 from .providers.llm import (
     FallbackLLMProvider,
     GatedLLMProvider,
@@ -29,8 +33,19 @@ from .providers.llm import (
 )
 from .providers.stt import DisabledSTTProvider, FasterWhisperProvider, STTProvider
 from .providers.tts import DisabledTTSProvider, PiperTTSProvider, SapiTTSProvider, TTSProvider
+from .ratelimit import RateLimiter
 from .repository import SQLiteRepository
-from .security import FlagService, SecretKeyStore
+from .security import (
+    PLAYER_TOKEN_LABEL,
+    AccessCodeVerifier,
+    FlagService,
+    PlayerToken,
+    PlayerTokenService,
+    SecretKeyStore,
+    generate_recovery_code,
+    hash_recovery_code,
+    normalize_recovery_code,
+)
 
 
 class APIModel(BaseModel):
@@ -57,10 +72,32 @@ class HintRequest(APIModel):
     language: LanguagePreference = LanguagePreference.AUTO
 
 
+PLAYER_COOKIE = "janus_player"
+
+
+class JoinRequest(APIModel):
+    code: str = Field(min_length=1, max_length=256)
+
+
+class RecoverRequest(APIModel):
+    recovery_code: str = Field(min_length=1, max_length=64)
+
+
 class AppContainer:
-    def __init__(self, config: LoadedConfig, engine: ChallengeEngine) -> None:
+    def __init__(
+        self,
+        config: LoadedConfig,
+        engine: ChallengeEngine,
+        *,
+        rate_limiter: RateLimiter,
+        player_tokens: PlayerTokenService,
+        access_codes: AccessCodeVerifier | None,
+    ) -> None:
         self.config = config
         self.engine = engine
+        self.rate_limiter = rate_limiter
+        self.player_tokens = player_tokens
+        self.access_codes = access_codes
 
 
 def _default_config_dir() -> Path:
@@ -135,7 +172,18 @@ def create_app(
         stt_provider or _build_stt(config),
         tts_provider or _build_tts(config),
     )
-    container = AppContainer(config, engine)
+    online = config.app.online
+    limits = online.limits
+    access_codes = AccessCodeVerifier.from_env(online.access_codes_env) if online.enabled else None
+    player_tokens = PlayerTokenService(flag_service.derive_subkey(PLAYER_TOKEN_LABEL))
+    rate_limiter = RateLimiter()
+    container = AppContainer(
+        config,
+        engine,
+        rate_limiter=rate_limiter,
+        player_tokens=player_tokens,
+        access_codes=access_codes,
+    )
     app = FastAPI(
         title=config.app.name,
         version=config.app.version,
@@ -144,10 +192,10 @@ def create_app(
         openapi_url=f"{config.app.api_prefix}/openapi.json",
     )
     app.state.janus = container
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.app.allowed_hosts)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.app.effective_allowed_hosts())
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=config.app.cors_origins,
+        allow_origins=config.app.effective_cors_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],
@@ -191,6 +239,63 @@ def create_app(
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    def _client_ip(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def _is_loopback(request: Request) -> bool:
+        try:
+            return ipaddress.ip_address(_client_ip(request)).is_loopback
+        except ValueError:
+            return False
+
+    def _player_token(request: Request) -> PlayerToken | None:
+        return player_tokens.verify(request.cookies.get(PLAYER_COOKIE))
+
+    def current_player(request: Request) -> str | None:
+        if not online.enabled:
+            return None
+        token = _player_token(request)
+        if token is None:
+            raise UnauthorizedError("Join the event with an access code first")
+        return token.player_id
+
+    def _require_online() -> None:
+        if not online.enabled:
+            raise NotFoundError("Not found")
+
+    def _issue_cookie(response: Response, player_id: str, created_at: datetime) -> datetime:
+        expires_at = created_at + timedelta(hours=online.player_ttl_hours)
+        expires_unix = int(expires_at.timestamp())
+        response.set_cookie(
+            PLAYER_COOKIE,
+            player_tokens.issue(player_id, expires_unix),
+            max_age=max(0, expires_unix - int(time.time())),
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            path="/",
+        )
+        return expires_at
+
+    if online.enabled:
+
+        @app.middleware("http")
+        async def require_https(request: Request, call_next):
+            # Loopback stays reachable over HTTP for the container healthcheck.
+            if request.url.scheme != "https" and not _is_loopback(request):
+                message = "HTTPS is required"
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": message,
+                        "error": {"code": "https_required", "message": message, "details": {}},
+                    },
+                )
+            response = await call_next(request)
+            if request.url.scheme == "https":
+                response.headers["Strict-Transport-Security"] = "max-age=31536000"
+            return response
+
     @app.get(f"{prefix}/config")
     async def public_config() -> dict[str, Any]:
         levels = sorted(config.levels.values(), key=lambda item: item.order)
@@ -203,6 +308,7 @@ def create_app(
                 "default_language": config.app.default_language,
                 "session_ttl_minutes": config.app.session_ttl_minutes,
                 "max_message_chars": config.app.max_message_chars,
+                "online": online.enabled,
             },
             "modes": [mode.model_dump(mode="json") for mode in config.modes.values()],
             "levels": [
@@ -234,7 +340,7 @@ def create_app(
         }
 
     @app.get(f"{prefix}/health")
-    async def health() -> dict[str, Any]:
+    async def health(request: Request) -> dict[str, Any]:
         llm_health, stt_health, tts_health = await asyncio.gather(
             engine.llm.health(), engine.stt.health(), engine.tts.health()
         )
@@ -249,6 +355,8 @@ def create_app(
             )
         )
         status = "ok" if configured_components_ready and not fallback_active else "degraded"
+        if online.enabled and not _is_loopback(request) and _player_token(request) is None:
+            return {"status": status, "version": config.app.version}
         return {
             "status": status,
             "version": config.app.version,
@@ -259,6 +367,59 @@ def create_app(
                 "tts": tts_health.model_dump(),
             },
         }
+
+    @app.post(f"{prefix}/join", status_code=201)
+    async def join(payload: JoinRequest, request: Request, response: Response) -> dict[str, Any]:
+        _require_online()
+        auth_key = f"auth:{_client_ip(request)}"
+        # Only failures count: many players behind one NAT must be able to join together.
+        rate_limiter.check(auth_key, limit=limits.auth_attempts_per_minute, window_seconds=60)
+        if not access_codes.verify(payload.code):
+            rate_limiter.record(auth_key, window_seconds=60)
+            raise UnauthorizedError("Invalid access code")
+        player_id = str(uuid.uuid4())
+        recovery_code = generate_recovery_code()
+        created_at = utc_now()
+        repo.create_player(
+            player_id, hash_recovery_code(normalize_recovery_code(recovery_code)), created_at
+        )
+        expires_at = _issue_cookie(response, player_id, created_at)
+        return {"recovery_code": recovery_code, "expires_at": expires_at.isoformat()}
+
+    @app.post(f"{prefix}/recover")
+    async def recover(
+        payload: RecoverRequest, request: Request, response: Response
+    ) -> dict[str, Any]:
+        _require_online()
+        auth_key = f"auth:{_client_ip(request)}"
+        rate_limiter.check(auth_key, limit=limits.auth_attempts_per_minute, window_seconds=60)
+        normalized = normalize_recovery_code(payload.recovery_code)
+        player = None
+        if normalized:
+            player = repo.find_player_by_recovery_hash(hash_recovery_code(normalized))
+        if player is None or player[1] + timedelta(hours=online.player_ttl_hours) <= utc_now():
+            rate_limiter.record(auth_key, window_seconds=60)
+            raise UnauthorizedError("Invalid or expired recovery code")
+        expires_at = _issue_cookie(response, player[0], player[1])
+        return {"expires_at": expires_at.isoformat()}
+
+    @app.get(f"{prefix}/players/me")
+    async def player_me(request: Request) -> dict[str, Any]:
+        _require_online()
+        token = _player_token(request)
+        if token is None:
+            raise UnauthorizedError("Join the event with an access code first")
+        return {
+            **engine.player_overview(token.player_id),
+            "expires_at": datetime.fromtimestamp(token.expires_at, UTC).isoformat(),
+        }
+
+    @app.post(f"{prefix}/logout", status_code=204)
+    async def logout() -> Response:
+        _require_online()
+        result = Response(status_code=204)
+        result.delete_cookie(PLAYER_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
+        return result
 
     @app.post(f"{prefix}/sessions", response_model=SessionRecord, status_code=201)
     async def create_session(payload: CreateSessionRequest) -> SessionRecord:
