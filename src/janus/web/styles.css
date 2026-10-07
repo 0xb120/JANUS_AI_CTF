@@ -2365,9 +2365,19 @@ em {
   50% { opacity: .45; }
 }
 
-.access-tabs { margin-bottom: 1.25rem; }
-.access-tabs button { cursor: pointer; }
+.access-tabs { grid-template-columns: repeat(2, 1fr); margin-bottom: 1.25rem; }
+.access-tabs button {
+  min-height: 40px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 11px/1.2 var(--font-mono);
+  letter-spacing: .1em;
+}
 .access-tabs button[aria-selected="true"] { background: var(--green); color: #03100d; }
+.access-tabs button:focus-visible { outline: 2px solid var(--green-bright); outline-offset: 2px; }
 .recovery-card { display: grid; gap: 1rem; max-width: 40rem; }
 .recovery-card code {
   font-family: var(--font-mono);
