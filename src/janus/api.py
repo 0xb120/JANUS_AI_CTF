@@ -491,16 +491,18 @@ def create_app(
         if owner is not None:
             rate_limiter.hit(f"turn:{owner}", limit=limits.turns_per_minute, window_seconds=60)
 
-    def _check_session_quota(owner: str | None) -> None:
+    def _charge_session_quota(owner: str | None) -> None:
+        # Check and record with no await in between, so concurrent requests of one
+        # player cannot all pass the check while the engine waits on the owner lock.
         if owner is not None:
-            rate_limiter.check(
+            rate_limiter.hit(
                 f"session:{owner}", limit=limits.sessions_per_hour, window_seconds=3600
             )
 
-    def _record_session_quota(owner: str | None) -> None:
+    def _refund_session_quota(owner: str | None) -> None:
         # Only a created session costs quota: a 404 or a nickname 409 is free to retry.
         if owner is not None:
-            rate_limiter.record(f"session:{owner}", window_seconds=3600)
+            rate_limiter.refund(f"session:{owner}")
 
     @app.post(f"{prefix}/sessions", response_model=SessionRecord, status_code=201)
     async def create_session(
@@ -512,15 +514,17 @@ def create_app(
                 "Game mode is fixed by the operator at startup",
                 details={"active_mode": config.app.default_mode},
             )
-        _check_session_quota(owner)
-        created = await engine.open_session(
-            mode_id=config.app.default_mode,
-            level_id=payload.level_id,
-            nickname=payload.nickname,
-            owner_id=owner,
-        )
-        _record_session_quota(owner)
-        return created
+        _charge_session_quota(owner)
+        try:
+            return await engine.open_session(
+                mode_id=config.app.default_mode,
+                level_id=payload.level_id,
+                nickname=payload.nickname,
+                owner_id=owner,
+            )
+        except Exception:
+            _refund_session_quota(owner)
+            raise
 
     @app.get(f"{prefix}/sessions/{{session_id}}", response_model=SessionRecord)
     async def get_session(
@@ -667,10 +671,12 @@ def create_app(
     async def reset_session(
         session_id: str, owner: str | None = Depends(current_player)
     ) -> SessionRecord:
-        _check_session_quota(owner)
-        replacement = await engine.reset_serialized(session_id, owner_id=owner)
-        _record_session_quota(owner)
-        return replacement
+        _charge_session_quota(owner)
+        try:
+            return await engine.reset_serialized(session_id, owner_id=owner)
+        except Exception:
+            _refund_session_quota(owner)
+            raise
 
     @app.get(f"{prefix}/leaderboard")
     async def leaderboard(

@@ -510,3 +510,46 @@ def test_concurrent_health_misses_share_one_probe(loaded_config, repository, fla
 
     assert [response.status_code for response in responses] == [200] * 5
     assert llm.health_calls == 1
+
+
+def test_concurrent_creates_cannot_exceed_the_session_quota(make_app):
+    import asyncio
+
+    import httpx
+
+    class BlockingLLM(MockLLMProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def generate(self, messages, *, temperature, max_tokens):
+            self.started.set()
+            await self.release.wait()
+            return "reply"
+
+    llm = BlockingLLM()
+    app = make_app(limits=OnlineLimits(sessions_per_hour=3), llm=llm)
+    body = {"level_id": "level_1", "nickname": "Ada"}
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            assert (await client.post("/api/join", json={"code": ACCESS_CODE})).status_code == 201
+            first = await client.post("/api/sessions", json=body)
+            assert first.status_code == 201
+            # A running turn holds the session lock, so every create waits on the owner lock.
+            turn = asyncio.create_task(
+                client.post(f"/api/sessions/{first.json()['id']}/messages", json={"text": "hi"})
+            )
+            await llm.started.wait()
+            creates = [asyncio.create_task(client.post("/api/sessions", json=body)) for _ in range(5)]
+            await asyncio.sleep(0.05)
+            llm.release.set()
+            await turn
+            return [response.status_code for response in await asyncio.gather(*creates)]
+
+    statuses = asyncio.run(exercise())
+
+    assert statuses.count(201) == 2
+    assert statuses.count(429) == 3

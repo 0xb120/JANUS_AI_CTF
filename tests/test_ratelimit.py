@@ -94,3 +94,33 @@ def test_error_handler_adds_retry_after_header(loaded_config, repository, flag_s
     assert response.status_code == 429
     assert response.headers["retry-after"] == "7"
     assert response.json()["error"]["code"] == "rate_limited"
+
+
+def test_refund_gives_back_the_most_recent_hit():
+    clock = FakeClock()
+    limiter = RateLimiter(clock=clock)
+    limiter.hit("session:p", limit=2, window_seconds=60)
+    clock.now += 30
+    limiter.hit("session:p", limit=2, window_seconds=60)
+
+    limiter.refund("session:p")
+
+    # The older hit (t=1000) remains, so a limit of 1 is still exhausted for 30 s.
+    with pytest.raises(RateLimitedError) as raised:
+        limiter.check("session:p", limit=1, window_seconds=60)
+    assert raised.value.details["retry_after"] == 30
+    limiter.hit("session:p", limit=2, window_seconds=60)
+    with pytest.raises(RateLimitedError):
+        limiter.hit("session:p", limit=2, window_seconds=60)
+
+
+def test_refund_without_hits_is_a_no_op():
+    limiter = RateLimiter(clock=FakeClock())
+
+    limiter.refund("never-seen")
+    limiter.hit("once", limit=1, window_seconds=60)
+    limiter.refund("once")
+    limiter.refund("once")
+
+    limiter.hit("once", limit=1, window_seconds=60)
+    assert limiter.prune(3600) == 0

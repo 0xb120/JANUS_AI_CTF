@@ -35,6 +35,12 @@ class RateLimiter:
         self.check(key, limit=limit, window_seconds=window_seconds)
         self.record(key, window_seconds=window_seconds)
 
+    def refund(self, key: str) -> None:
+        """Give back the most recent hit for key, e.g. when the charged action failed."""
+        hits = self._hits.get(key)
+        if hits:
+            hits.pop()
+
     def prune(self, max_window_seconds: float) -> int:
         horizon = self._clock() - max_window_seconds
         idle = [key for key, hits in self._hits.items() if not hits or hits[-1] <= horizon]
