@@ -204,21 +204,32 @@ class ChallengeEngine:
             return self.repository.create_session(record)
         # Per-owner serialization: concurrent opens cannot all pass the limit check.
         async with self._owner_lock(owner_id):
-            # One player cannot multiply their LLM share by opening parallel sessions.
-            limit = self.config.app.online.limits.max_active_sessions
-            active = self.repository.active_sessions_for_owner(owner_id)
-            for stale in active[: max(0, len(active) - limit + 1)]:
-                try:
-                    async with self._session_lock(stale.id):
-                        self._retire(stale.id)
-                except NotFoundError:
-                    continue
+            # Refuse a taken nickname before retiring anything: a 409 has no side effect.
+            self._reject_taken_nickname(record, owner_id)
+            await self._retire_beyond_cap(owner_id)
             # No await from here to the insert: the nickname check and insert are atomic.
-            if record.nickname is not None and self.repository.nickname_taken_by_other(
-                record.nickname, owner_id
-            ):
-                raise ConflictError("Nickname already in use", code="nickname_taken")
+            # Checked again because another player may have claimed it while we retired.
+            self._reject_taken_nickname(record, owner_id)
             return self.repository.create_session(record)
+
+    def _reject_taken_nickname(self, record: SessionRecord, owner_id: str) -> None:
+        if record.nickname is not None and self.repository.nickname_taken_by_other(
+            record.nickname, owner_id
+        ):
+            raise ConflictError("Nickname already in use", code="nickname_taken")
+
+    async def _retire_beyond_cap(self, owner_id: str) -> None:
+        """Leave the owner at most max_active_sessions - 1 active sessions (owner lock held)."""
+
+        # One player cannot multiply their LLM share by opening parallel sessions.
+        limit = self.config.app.online.limits.max_active_sessions
+        active = self.repository.active_sessions_for_owner(owner_id)
+        for stale in active[: max(0, len(active) - limit + 1)]:
+            try:
+                async with self._session_lock(stale.id):
+                    self._retire(stale.id)
+            except NotFoundError:
+                continue
 
     def _owner_lock(self, owner_id: str) -> asyncio.Lock:
         lock = self._owner_locks.get(owner_id)
@@ -580,9 +591,24 @@ class ChallengeEngine:
             return self.hint(session_id, language)
 
     async def reset_serialized(self, session_id: str, owner_id: str | None = None) -> SessionRecord:
-        async with self._session_lock(session_id):
-            self._owned(session_id, owner_id, locked=True)
-            return self.reset(session_id)
+        if owner_id is None:
+            async with self._session_lock(session_id):
+                self._owned(session_id, owner_id, locked=True)
+                return self.reset(session_id)
+        # Same lock order and cap discipline as open_session: owner lock, then session lock.
+        async with self._owner_lock(owner_id):
+            async with self._session_lock(session_id):
+                session = self._owned(session_id, owner_id, locked=True)
+                replacement = self._build_session(
+                    mode_id=session.mode_id,
+                    level_id=session.level_id,
+                    nickname=session.nickname,
+                    owner_id=owner_id,
+                )
+                self._discard_for_reset(session)
+            # Resetting an old, already retired session must not add an active one.
+            await self._retire_beyond_cap(owner_id)
+            return self.repository.create_session(replacement)
 
     async def delete_serialized(self, session_id: str, owner_id: str | None = None) -> None:
         async with self._session_lock(session_id):
@@ -643,19 +669,22 @@ class ChallengeEngine:
 
     def reset(self, session_id: str) -> SessionRecord:
         session = self.get_session(session_id)
-        self._purge_audio(session.id)
         replacement = self.create_session(
             mode_id=session.mode_id,
             level_id=session.level_id,
             nickname=session.nickname,
             owner_id=session.owner_id,
         )
+        self._discard_for_reset(session)
+        return replacement
+
+    def _discard_for_reset(self, session: SessionRecord) -> None:
+        self._purge_audio(session.id)
         if session.mode_id == "stand":
             self.repository.delete_session(session.id)
         elif session.status is SessionStatus.ACTIVE:
             self.repository.set_status(session.id, SessionStatus.RESET)
             self.repository.delete_messages(session.id)
-        return replacement
 
     def delete(self, session_id: str) -> None:
         session = self.get_session(session_id)

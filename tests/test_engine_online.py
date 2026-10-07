@@ -317,3 +317,46 @@ def test_concurrent_nickname_claim_has_exactly_one_winner(online_config, reposit
     assert len(failures) == 1
     assert failures[0].code == "nickname_taken"
     assert sum(isinstance(item, SessionRecord) for item in results) == 1
+
+
+def test_reset_of_a_retired_session_respects_the_active_session_cap(
+    online_config, repository, flag_service
+):
+    engine = _engine(online_config, repository, flag_service)
+    first = asyncio.run(engine.open_session(nickname="Ada", owner_id="p1"))
+    second = asyncio.run(engine.open_session(nickname="Ada", owner_id="p1"))
+
+    replacement = asyncio.run(engine.reset_serialized(first.id, owner_id="p1"))
+    again = asyncio.run(engine.reset_serialized(first.id, owner_id="p1"))
+
+    assert [item.id for item in repository.active_sessions_for_owner("p1")] == [again.id]
+    assert repository.get_session(second.id).status is SessionStatus.RESET
+    assert repository.get_session(replacement.id).status is SessionStatus.RESET
+    assert again.owner_id == "p1" and again.nickname == "Ada"
+
+
+def test_reset_of_the_active_session_replaces_it(online_config, repository, flag_service):
+    engine = _engine(online_config, repository, flag_service)
+    session = asyncio.run(engine.open_session(nickname="Ada", level_id="level_2", owner_id="p1"))
+
+    replacement = asyncio.run(engine.reset_serialized(session.id, owner_id="p1"))
+
+    assert replacement.id != session.id
+    assert replacement.level_id == "level_2"
+    assert repository.get_session(session.id).status is SessionStatus.RESET
+    assert [item.id for item in repository.active_sessions_for_owner("p1")] == [replacement.id]
+
+
+def test_taken_nickname_does_not_retire_the_running_session(
+    online_config, repository, flag_service
+):
+    engine = _engine(online_config, repository, flag_service)
+    asyncio.run(engine.open_session(nickname="Ada", owner_id="p1"))
+    mine = asyncio.run(engine.open_session(nickname="Carl", owner_id="p2"))
+
+    with pytest.raises(ConflictError) as raised:
+        asyncio.run(engine.open_session(nickname="ADA", owner_id="p2"))
+
+    assert raised.value.code == "nickname_taken"
+    assert repository.get_session(mine.id).status is SessionStatus.ACTIVE
+    assert [item.id for item in repository.active_sessions_for_owner("p2")] == [mine.id]
