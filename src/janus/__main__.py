@@ -82,6 +82,11 @@ def main() -> None:
         default=None,
         help="Comma-separated IPs/CIDRs whose X-Forwarded-* headers are trusted.",
     )
+    parser.add_argument(
+        "--no-access-log",
+        action="store_true",
+        help="Disable the uvicorn per-request access log (client IPs and paths).",
+    )
     args = parser.parse_args()
     config_dir = args.config_dir or (Path(__file__).resolve().parents[2] / "configs")
     config = load_config(config_dir)
@@ -150,6 +155,7 @@ def main() -> None:
         create_app(loaded_config=config),
         host=args.host,
         port=args.port,
+        access_log=not args.no_access_log,
         **_proxy_options(config),
     )
 

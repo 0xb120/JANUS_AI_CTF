@@ -176,3 +176,18 @@ def test_cli_ignores_forwarded_headers_without_trusted_proxies(monkeypatch):
 
     assert captured["run"]["proxy_headers"] is False
     assert "forwarded_allow_ips" not in captured["run"]
+
+
+@pytest.mark.parametrize(("argv", "expected"), [([], True), (["--no-access-log"], False)])
+def test_cli_can_disable_the_access_log(monkeypatch, argv, expected):
+    import janus.__main__ as entrypoint
+
+    captured = {}
+    monkeypatch.setattr(sys, "argv", ["janus", *argv])
+    monkeypatch.setattr(entrypoint, "create_app", lambda loaded_config: object())
+    monkeypatch.setattr(
+        entrypoint.uvicorn, "run", lambda app, **kwargs: captured.setdefault("run", kwargs)
+    )
+    main()
+
+    assert captured["run"]["access_log"] is expected

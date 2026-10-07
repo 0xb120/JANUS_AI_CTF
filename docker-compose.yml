@@ -86,6 +86,7 @@ services:
       JANUS_LLM_PROVIDER: ${JANUS_LLM_PROVIDER:-ollama}
       JANUS_LLM_MODEL: ${JANUS_LLM_MODEL:-qwen3:4b-instruct}
       JANUS_SECRET_KEY: ${JANUS_SECRET_KEY:-}
+      JANUS_ACCESS_LOG: ${JANUS_ACCESS_LOG:-1}
       HF_HUB_OFFLINE: "1"
     volumes:
       - janus-data:/data

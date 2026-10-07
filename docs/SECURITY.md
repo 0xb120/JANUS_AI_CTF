@@ -262,14 +262,21 @@ turno in corso non fanno scadere la sessione.
 
 In modalità online `/api/health` senza cookie valido e da un client non locale
 diretto restituisce solo `{status, version}`, senza i componenti (provider,
-modelli, percorsi).
+modelli, percorsi), e non avvia controlli sui provider: riporta l'ultimo stato
+noto, oppure `unknown` se nessun controllo è ancora stato eseguito. I controlli
+completi (giocatori, healthcheck locale, modalità locale) sono condivisi in una
+cache di 15 secondi, così molti client che interrogano `/api/health` non
+moltiplicano le chiamate ai provider (con Hugging Face, chiamate esterne con il
+token dell'operatore).
 
 ### Log di accesso e privacy
 
 - Il log di accesso di uvicorn registra IP e percorsi, che contengono gli ID di
-  sessione. È attivo di default e `python -m janus` non espone l'opzione
-  `--no-access-log` di uvicorn: per ridurlo limitare la retention dei log del
-  container (driver di logging Docker con `max-size`/`max-file`).
+  sessione. È attivo di default: si disattiva con `python -m janus
+  --no-access-log` oppure, con Docker, con `JANUS_ACCESS_LOG=0` in `.env`. Se
+  resta attivo, limitare la retention dei log del container (driver di logging
+  Docker con `max-size`/`max-file`). Gli errori applicativi restano comunque nel
+  log.
 - Caddy non scrive log di accesso finché nel `docker/Caddyfile` non si aggiunge
   una direttiva `log`: non aggiungerla, oppure limitarne i campi, se non serve.
 - I dati dei giocatori (riga `players` con hash del recupero) vivono
@@ -331,12 +338,15 @@ all'operatore.
 
 ## Superficie API locale
 
-/api/docs espone OpenAPI sulla macchina. Non esiste autenticazione per gli
-endpoint pubblici. Questo è accettabile soltanto nel deployment locale
-presidiato. In modalità locale (default) non pubblicare la porta 8000, non usare
-0.0.0.0 e non configurare port forwarding. In modalità online l'accesso è
-protetto come descritto in [Modalità online](#modalità-online-internet), con
-`/api/docs` incluso.
+JANUS non serve `/api/docs` né `/api/redoc` (interfacce Swagger/ReDoc
+disattivate); lo schema OpenAPI resta pubblico su `/api/openapi.json` e descrive
+le rotte senza esporre dati. Non esiste autenticazione per gli endpoint
+pubblici. Questo è accettabile soltanto nel deployment locale presidiato. In
+modalità locale (default) non pubblicare la porta 8000, non usare 0.0.0.0 e non
+configurare port forwarding. In modalità online gli endpoint di gioco sono
+protetti come descritto in [Modalità online](#modalità-online-internet);
+`/api/openapi.json`, `/api/config`, `/api/leaderboard` e `/api/health` (ridotto)
+restano accessibili senza cookie.
 
 Il database non va aperto o copiato mentre JANUS è in esecuzione. Effettuare
 backup dopo aver chiuso il launcher.

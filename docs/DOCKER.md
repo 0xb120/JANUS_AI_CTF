@@ -262,8 +262,10 @@ python scripts/online_load_test.py --base-url https://127.0.0.1:8443 \
 Per ruotare il codice evento aggiornare `JANUS_ACCESS_CODES` in `.env` e
 rieseguire `docker compose -f docker-compose.yml -f docker-compose.public.yml up -d`
 (con gli stessi `-f` di HF/GPU usati all'avvio, oppure `docker-compose.proxy.yml`
-con proxy esterno; senza l'override `janus` torna senza modalità online). I log di accesso di JANUS e di Caddy
-contengono IP e ID di sessione nei percorsi: per ridurli si veda
+con proxy esterno; senza l'override `janus` torna senza modalità online). I log
+di accesso di JANUS e di Caddy contengono IP e ID di sessione nei percorsi: il log
+di accesso di JANUS si disattiva con `JANUS_ACCESS_LOG=0` in `.env` (CLI:
+`--no-access-log`); per il resto si veda
 [SECURITY.md](SECURITY.md#log-di-accesso-e-privacy).
 
 ## Configurazione
@@ -290,6 +292,7 @@ facoltative; `.env.example` riporta l'elenco completo.
 | `OLLAMA_KEEP_ALIVE` | `24h` | Tempo di permanenza del modello in memoria |
 | `OLLAMA_NUM_PARALLEL` | `1` | Richieste LLM servite in parallelo |
 | `JANUS_ONLINE` | `0` | `1` abilita la modalità online (impostata da `docker-compose.public.yml`) |
+| `JANUS_ACCESS_LOG` | `1` | `0`, `false` o `no` disattiva il log di accesso di uvicorn (`--no-access-log`) |
 | `JANUS_PUBLIC_HOST` | vuoto | Hostname pubblico (online; obbligatoria con gli override public e proxy) |
 | `JANUS_ACCESS_CODES` | vuoto | Codici evento separati da virgola (online; obbligatoria con gli override public e proxy) |
 | `JANUS_TRUSTED_PROXIES` | vuoto | IP/CIDR dei proxy di cui fidarsi per `X-Forwarded-*` (obbligatoria con l'override proxy; impostata da public) |

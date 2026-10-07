@@ -19,6 +19,9 @@ set -- ${JANUS_PUBLIC_HOST:+--public-host "$JANUS_PUBLIC_HOST"} \
 case "${JANUS_ONLINE:-0}" in
     1|true|yes) set -- --online "$@" ;;
 esac
+case "${JANUS_ACCESS_LOG:-1}" in
+    0|false|no) set -- --no-access-log "$@" ;;
+esac
 
 exec python -m janus \
     --config-dir /app/configs \
