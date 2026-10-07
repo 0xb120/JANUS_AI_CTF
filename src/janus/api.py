@@ -9,6 +9,7 @@ import logging
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -77,6 +78,8 @@ class HintRequest(APIModel):
 
 
 PLAYER_COOKIE = "janus_player"
+# One set of provider probes serves every /health caller within this window.
+HEALTH_CACHE_SECONDS = 15.0
 _FORWARDING_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-proto")
 
 
@@ -159,6 +162,7 @@ def create_app(
     llm_provider: LLMProvider | None = None,
     stt_provider: STTProvider | None = None,
     tts_provider: TTSProvider | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     config = loaded_config or load_config(config_dir or _default_config_dir())
     repo = repository or SQLiteRepository(config.resolve_runtime_path(config.app.database_path))
@@ -284,7 +288,7 @@ def create_app(
     def _player_token(request: Request) -> PlayerToken | None:
         return player_tokens.verify(request.cookies.get(PLAYER_COOKIE))
 
-    def current_player(request: Request) -> str | None:
+    async def current_player(request: Request) -> str | None:
         if not online.enabled:
             return None
         token = _player_token(request)
@@ -373,8 +377,37 @@ def create_app(
             },
         }
 
+    health_cache: dict[str, Any] = {}
+    health_lock = asyncio.Lock()
+
+    def _fresh_health() -> dict[str, Any] | None:
+        checked_at = health_cache.get("checked_at")
+        if checked_at is None or clock() - checked_at >= HEALTH_CACHE_SECONDS:
+            return None
+        return health_cache["body"]
+
+    async def _cached_health() -> dict[str, Any]:
+        cached = _fresh_health()
+        if cached is not None:
+            return cached
+        # Concurrent misses wait for the one probe in flight instead of probing again.
+        async with health_lock:
+            cached = _fresh_health()
+            if cached is None:
+                cached = await _probe_health()
+                health_cache.update(body=cached, checked_at=clock())
+            return cached
+
     @app.get(f"{prefix}/health")
     async def health(request: Request) -> dict[str, Any]:
+        if online.enabled and not _is_direct_local(request) and _player_token(request) is None:
+            # Anonymous Internet callers never trigger probes (remote LLMs cost a token call).
+            last = health_cache.get("body")
+            status = last["status"] if last is not None else "unknown"
+            return {"status": status, "version": config.app.version}
+        return await _cached_health()
+
+    async def _probe_health() -> dict[str, Any]:
         llm_health, stt_health, tts_health = await asyncio.gather(
             engine.llm.health(), engine.stt.health(), engine.tts.health()
         )
@@ -389,8 +422,6 @@ def create_app(
             )
         )
         status = "ok" if configured_components_ready and not fallback_active else "degraded"
-        if online.enabled and not _is_direct_local(request) and _player_token(request) is None:
-            return {"status": status, "version": config.app.version}
         return {
             "status": status,
             "version": config.app.version,
@@ -460,11 +491,16 @@ def create_app(
         if owner is not None:
             rate_limiter.hit(f"turn:{owner}", limit=limits.turns_per_minute, window_seconds=60)
 
-    def _limit_session(owner: str | None) -> None:
+    def _check_session_quota(owner: str | None) -> None:
         if owner is not None:
-            rate_limiter.hit(
+            rate_limiter.check(
                 f"session:{owner}", limit=limits.sessions_per_hour, window_seconds=3600
             )
+
+    def _record_session_quota(owner: str | None) -> None:
+        # Only a created session costs quota: a 404 or a nickname 409 is free to retry.
+        if owner is not None:
+            rate_limiter.record(f"session:{owner}", window_seconds=3600)
 
     @app.post(f"{prefix}/sessions", response_model=SessionRecord, status_code=201)
     async def create_session(
@@ -476,13 +512,15 @@ def create_app(
                 "Game mode is fixed by the operator at startup",
                 details={"active_mode": config.app.default_mode},
             )
-        _limit_session(owner)
-        return await engine.open_session(
+        _check_session_quota(owner)
+        created = await engine.open_session(
             mode_id=config.app.default_mode,
             level_id=payload.level_id,
             nickname=payload.nickname,
             owner_id=owner,
         )
+        _record_session_quota(owner)
+        return created
 
     @app.get(f"{prefix}/sessions/{{session_id}}", response_model=SessionRecord)
     async def get_session(
@@ -629,8 +667,10 @@ def create_app(
     async def reset_session(
         session_id: str, owner: str | None = Depends(current_player)
     ) -> SessionRecord:
-        _limit_session(owner)
-        return await engine.reset_serialized(session_id, owner_id=owner)
+        _check_session_quota(owner)
+        replacement = await engine.reset_serialized(session_id, owner_id=owner)
+        _record_session_quota(owner)
+        return replacement
 
     @app.get(f"{prefix}/leaderboard")
     async def leaderboard(

@@ -24,7 +24,7 @@ ACCESS_CODE = "event-code-2026"
 def make_app(monkeypatch, loaded_config, repository, flag_service):
     monkeypatch.setenv("JANUS_ACCESS_CODES", ACCESS_CODE)
 
-    def factory(*, limits=None, llm=None, tts=None, repo=None):
+    def factory(*, limits=None, llm=None, tts=None, repo=None, **extra):
         online = OnlineSettings(
             enabled=True, public_host="ctf.example.com", limits=limits or OnlineLimits()
         )
@@ -38,6 +38,7 @@ def make_app(monkeypatch, loaded_config, repository, flag_service):
             llm_provider=llm or MockLLMProvider(),
             stt_provider=DisabledSTTProvider(),
             tts_provider=tts or DisabledTTSProvider(),
+            **extra,
         )
 
     return factory
@@ -357,3 +358,155 @@ def test_players_me_and_sessions_require_the_cookie(make_app):
     assert client.get("/api/players/me").status_code == 401
     assert client.post("/api/sessions", json={"nickname": "Ada"}).status_code == 401
     assert client.get("/api/players/me", headers=forged).status_code == 401
+
+
+class CountingLLM(MockLLMProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.health_calls = 0
+
+    async def health(self):
+        self.health_calls += 1
+        return await super().health()
+
+
+def test_anonymous_health_runs_no_provider_probes(make_app):
+    llm = CountingLLM()
+    client = https_client(make_app(llm=llm))
+
+    body = client.get("/api/health").json()
+
+    assert body == {"status": "unknown", "version": body["version"]}
+    assert llm.health_calls == 0
+
+
+def test_health_probes_are_cached_for_fifteen_seconds(make_app):
+    llm = CountingLLM()
+    now = [1000.0]
+    app = make_app(llm=llm, clock=lambda: now[0])
+    player = https_client(app)
+    join(player)
+    anonymous = https_client(app)
+
+    first = player.get("/api/health").json()
+    second = player.get("/api/health").json()
+    assert llm.health_calls == 1
+    assert first == second and "components" in first
+    assert anonymous.get("/api/health").json() == {
+        "status": first["status"],
+        "version": first["version"],
+    }
+    assert llm.health_calls == 1
+
+    now[0] += 16
+    player.get("/api/health")
+    assert llm.health_calls == 2
+
+
+def test_local_health_keeps_its_shape_and_is_cached(loaded_config, repository, flag_service):
+    llm = CountingLLM()
+    client = TestClient(
+        create_app(
+            loaded_config=loaded_config,
+            repository=repository,
+            flag_service=flag_service,
+            llm_provider=llm,
+            stt_provider=DisabledSTTProvider(),
+            tts_provider=DisabledTTSProvider(),
+        )
+    )
+
+    bodies = [client.get("/api/health").json() for _ in range(2)]
+
+    assert llm.health_calls == 1
+    for body in bodies:
+        assert set(body) == {"status", "version", "components"}
+        assert set(body["components"]) == {"database", "llm", "stt", "tts"}
+
+
+def test_resetting_a_retired_session_keeps_one_active_session(make_app):
+    app = make_app()
+    client, first = _player(app, "Ada")
+    client.post("/api/sessions", json={"level_id": "level_1", "nickname": "Ada"})
+
+    for _ in range(2):
+        response = client.post(f"/api/sessions/{first['id']}/reset")
+        assert response.status_code == 200
+        replacement = response.json()
+
+    active = client.get("/api/players/me").json()["active_sessions"]
+    assert [item["id"] for item in active] == [replacement["id"]]
+
+
+def test_nickname_conflicts_do_not_consume_the_session_quota(make_app):
+    app = make_app(limits=OnlineLimits(sessions_per_hour=2))
+    _player(app, "Ada")
+    client, _ = _player(app, "Bob")
+
+    for _ in range(3):
+        taken = client.post("/api/sessions", json={"level_id": "level_1", "nickname": "Ada"})
+        assert taken.status_code == 409
+    again = client.post("/api/sessions", json={"level_id": "level_1", "nickname": "Bob"})
+    assert again.status_code == 201
+    limited = client.post("/api/sessions", json={"level_id": "level_1", "nickname": "Bob"})
+    assert limited.status_code == 429
+
+
+def test_failed_resets_do_not_consume_the_session_quota(make_app):
+    app = make_app(limits=OnlineLimits(sessions_per_hour=2))
+    _, foreign = _player(app, "Ada")
+    client, mine = _player(app, "Bob")
+
+    for _ in range(3):
+        assert client.post(f"/api/sessions/{foreign['id']}/reset").status_code == 404
+    reset = client.post(f"/api/sessions/{mine['id']}/reset")
+    assert reset.status_code == 200
+    limited = client.post(f"/api/sessions/{reset.json()['id']}/reset")
+    assert limited.status_code == 429
+
+
+def test_player_dependency_runs_on_the_event_loop(make_app):
+    import inspect
+
+    from fastapi.routing import APIRoute
+
+    route = next(
+        item
+        for item in make_app().routes
+        if isinstance(item, APIRoute) and item.path == "/api/sessions/{session_id}"
+        and "GET" in item.methods
+    )
+    [dependency] = route.dependant.dependencies
+
+    assert inspect.iscoroutinefunction(dependency.call)
+
+
+def test_concurrent_health_misses_share_one_probe(loaded_config, repository, flag_service):
+    import asyncio
+
+    import httpx
+
+    class SlowCountingLLM(CountingLLM):
+        async def health(self):
+            await asyncio.sleep(0.05)
+            return await super().health()
+
+    llm = SlowCountingLLM()
+    app = create_app(
+        loaded_config=loaded_config,
+        repository=repository,
+        flag_service=flag_service,
+        llm_provider=llm,
+        stt_provider=DisabledSTTProvider(),
+        tts_provider=DisabledTTSProvider(),
+    )
+
+    async def burst():
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await asyncio.gather(*(client.get("/api/health") for _ in range(5)))
+
+    responses = asyncio.run(burst())
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert llm.health_calls == 1
