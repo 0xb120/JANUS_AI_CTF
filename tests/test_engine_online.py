@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from janus.config import OnlineSettings
-from janus.domain import AudioArtifact, HealthComponent, SessionStatus
+from janus.domain import (
+    AudioArtifact,
+    HealthComponent,
+    SessionRecord,
+    SessionStatus,
+    utc_now,
+)
 from janus.engine import ChallengeEngine
 from janus.errors import CapacityError, ConflictError, InvalidSessionError, NotFoundError
 from janus.providers.llm import GatedLLMProvider, MockLLMProvider
@@ -160,6 +167,7 @@ def test_local_mode_still_queues_concurrent_turns(loaded_config, repository, fla
         await asyncio.sleep(0)
         llm.release.set()
         await asyncio.gather(first, second)
+        assert repository.get_session(session.id).turn_count == 2
 
     asyncio.run(exercise())
 
@@ -213,3 +221,120 @@ def test_capacity_error_does_not_cost_a_turn_or_leave_an_unanswered_message(
         assert repository.get_session(session_a.id).turn_count == 1
 
     asyncio.run(exercise())
+
+
+class ExplodingSTT:
+    async def transcribe(self, audio_path, language=None):
+        raise AssertionError("STT must not run for a foreign session")
+
+    async def health(self):
+        return HealthComponent(available=True, detail="exploding")
+
+
+def _aged_session(engine, repository, owner_id, *, seconds_left, nickname="Ada"):
+    limit = engine._time_limit_seconds(
+        SessionRecord(id="x", mode_id="score", level_id="level_1", nickname=nickname)
+    )
+    return repository.create_session(
+        SessionRecord(
+            id=str(uuid.uuid4()),
+            mode_id="score",
+            level_id="level_1",
+            nickname=nickname,
+            owner_id=owner_id,
+            started_at=utc_now() - timedelta(seconds=limit - seconds_left),
+        )
+    )
+
+
+def test_foreign_voice_never_reaches_stt(online_config, repository, flag_service, tmp_path):
+    engine = ChallengeEngine(
+        online_config,
+        repository,
+        flag_service,
+        MockLLMProvider(),
+        ExplodingSTT(),
+        DisabledTTSProvider(),
+    )
+    session = asyncio.run(engine.open_session(nickname="Ada", owner_id="p1"))
+
+    with pytest.raises(NotFoundError, match="^Session not found$"):
+        asyncio.run(engine.voice(session.id, tmp_path / "a.wav", owner_id="p2"))
+
+
+def test_foreign_read_of_an_overdue_session_has_no_expiry_side_effect(
+    online_config, repository, flag_service
+):
+    engine = _engine(online_config, repository, flag_service)
+    session = _aged_session(engine, repository, "p1", seconds_left=-5)
+
+    with pytest.raises(NotFoundError, match="^Session not found$"):
+        asyncio.run(engine.get_session_serialized(session.id, owner_id="p2"))
+
+    assert repository.get_session(session.id).status is SessionStatus.ACTIVE
+
+
+def test_unlocked_readers_do_not_expire_a_session_during_a_running_turn(
+    online_config, repository, flag_service
+):
+    llm = BlockingLLM()
+    engine = _engine(online_config, repository, flag_service, llm=llm)
+    session = _aged_session(engine, repository, "p1", seconds_left=1)
+
+    async def exercise():
+        turn = asyncio.create_task(engine.message(session.id, "one", owner_id="p1"))
+        await llm.started.wait()
+        await asyncio.sleep(1.2)  # the limit passes while the model is thinking
+        overview = engine.player_overview("p1")
+        engine.history(session.id, owner_id="p1")
+        assert repository.get_session(session.id).status is SessionStatus.ACTIVE
+        assert [item["id"] for item in overview["active_sessions"]] == [session.id]
+        llm.release.set()
+        await turn
+
+    asyncio.run(exercise())
+    assert [item.role for item in repository.list_messages(session.id)] == ["user", "assistant"]
+    assert repository.get_session(session.id).status is SessionStatus.ACTIVE
+
+
+def test_concurrent_opens_leave_a_single_active_session(online_config, repository, flag_service):
+    llm = BlockingLLM()
+    engine = _engine(online_config, repository, flag_service, llm=llm)
+
+    async def exercise():
+        first = await engine.open_session(nickname="Ada", owner_id="p1")
+        turn = asyncio.create_task(engine.message(first.id, "one", owner_id="p1"))
+        await llm.started.wait()
+        opens = [
+            asyncio.create_task(engine.open_session(nickname="Ada", owner_id="p1"))
+            for _ in range(3)
+        ]
+        await asyncio.sleep(0.05)
+        llm.release.set()
+        await turn
+        await asyncio.gather(*opens)
+
+    asyncio.run(exercise())
+    assert len(repository.active_sessions_for_owner("p1")) == 1
+
+
+def test_concurrent_nickname_claim_has_exactly_one_winner(online_config, repository, flag_service):
+    llm = BlockingLLM()
+    engine = _engine(online_config, repository, flag_service, llm=llm)
+
+    async def exercise():
+        first = await engine.open_session(nickname="Ada", owner_id="p1")
+        turn = asyncio.create_task(engine.message(first.id, "one", owner_id="p1"))
+        await llm.started.wait()
+        mine = asyncio.create_task(engine.open_session(nickname="Zed", owner_id="p1"))
+        theirs = asyncio.create_task(engine.open_session(nickname="zed", owner_id="p2"))
+        await asyncio.sleep(0.05)
+        llm.release.set()
+        await turn
+        return await asyncio.gather(mine, theirs, return_exceptions=True)
+
+    results = asyncio.run(exercise())
+    failures = [item for item in results if isinstance(item, ConflictError)]
+    assert len(failures) == 1
+    assert failures[0].code == "nickname_taken"
+    assert sum(isinstance(item, SessionRecord) for item in results) == 1

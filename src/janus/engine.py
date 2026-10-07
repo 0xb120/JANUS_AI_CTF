@@ -128,6 +128,7 @@ class ChallengeEngine:
         # Session ids are never reused. Keeping their locks for the process
         # avoids replacing a lock while an older waiter still references it.
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._owner_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def default_language(self) -> Language:
@@ -199,11 +200,10 @@ class ChallengeEngine:
         record = self._build_session(
             mode_id=mode_id, level_id=level_id, nickname=nickname, owner_id=owner_id
         )
-        if owner_id is not None:
-            if record.nickname is not None and self.repository.nickname_taken_by_other(
-                record.nickname, owner_id
-            ):
-                raise ConflictError("Nickname already in use", code="nickname_taken")
+        if owner_id is None:
+            return self.repository.create_session(record)
+        # Per-owner serialization: concurrent opens cannot all pass the limit check.
+        async with self._owner_lock(owner_id):
             # One player cannot multiply their LLM share by opening parallel sessions.
             limit = self.config.app.online.limits.max_active_sessions
             active = self.repository.active_sessions_for_owner(owner_id)
@@ -213,7 +213,19 @@ class ChallengeEngine:
                         self._retire(stale.id)
                 except NotFoundError:
                     continue
-        return self.repository.create_session(record)
+            # No await from here to the insert: the nickname check and insert are atomic.
+            if record.nickname is not None and self.repository.nickname_taken_by_other(
+                record.nickname, owner_id
+            ):
+                raise ConflictError("Nickname already in use", code="nickname_taken")
+            return self.repository.create_session(record)
+
+    def _owner_lock(self, owner_id: str) -> asyncio.Lock:
+        lock = self._owner_locks.get(owner_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._owner_locks[owner_id] = lock
+        return lock
 
     def _time_limit_seconds(self, session: SessionRecord) -> int:
         level_limit = self.config.levels[session.level_id].time_limit_seconds
@@ -241,12 +253,19 @@ class ChallengeEngine:
             return expired
         return session
 
-    def _owned(self, session_id: str, owner_id: str | None) -> SessionRecord:
-        session = self.get_session(session_id)
-        if owner_id is not None and session.owner_id != owner_id:
-            # Same error as a missing session: ids of other players are not confirmed.
+    def _owned(
+        self, session_id: str, owner_id: str | None, *, locked: bool = False
+    ) -> SessionRecord:
+        raw = self.repository.get_session(session_id)
+        if owner_id is not None and raw.owner_id != owner_id:
+            # Same error as a missing session, and no side effect for foreign callers.
             raise NotFoundError("Session not found")
-        return session
+        lock = self._session_locks.get(session_id)
+        if locked or lock is None or not lock.locked():
+            return self.get_session(session_id)
+        # A turn is in flight: its processing time is not booked yet, so expiring the
+        # session from an unlocked reader would corrupt the running turn.
+        return raw
 
     def _retire(self, session_id: str) -> None:
         session = self.get_session(session_id)
@@ -283,7 +302,7 @@ class ChallengeEngine:
         self, session_id: str, owner_id: str | None = None
     ) -> SessionRecord:
         async with self._session_lock(session_id):
-            return self._owned(session_id, owner_id)
+            return self._owned(session_id, owner_id, locked=True)
 
     def _purge_audio(self, session_id: str) -> None:
         for audio_id in self._audio_by_session.pop(session_id, set()):
@@ -394,7 +413,7 @@ class ChallengeEngine:
         owner_id: str | None = None,
     ) -> TurnResult:
         async with self._reject_if_turn_running(session_id, owner_id):
-            self._owned(session_id, owner_id)
+            self._owned(session_id, owner_id, locked=True)
             return await self._message_locked(
                 session_id,
                 text,
@@ -490,7 +509,9 @@ class ChallengeEngine:
                     # Text gameplay remains available if an optional voice or driver fails.
                     audio_url = None
         except CapacityError:
-            # The gate rejected the call before any model work: the player keeps the turn.
+            # The gate was full (possibly on a later pass of a tool-using level): the
+            # player keeps the turn and the unanswered message is dropped.
+            assert user_message.id is not None
             self.repository.delete_message(user_message.id)
             self.repository.decrement_turn(session.id)
             raise
@@ -517,7 +538,7 @@ class ChallengeEngine:
         owner_id: str | None = None,
     ) -> TurnResult:
         async with self._reject_if_turn_running(session_id, owner_id):
-            self._owned(session_id, owner_id)
+            self._owned(session_id, owner_id, locked=True)
             self._require_active(session_id)
             forced = None if language is LanguagePreference.AUTO else Language(language.value)
             processing_started = time.perf_counter()
@@ -545,7 +566,7 @@ class ChallengeEngine:
         self, session_id: str, candidate: str, owner_id: str | None = None
     ) -> SubmissionResult:
         async with self._session_lock(session_id):
-            self._owned(session_id, owner_id)
+            self._owned(session_id, owner_id, locked=True)
             return self.submit(session_id, candidate)
 
     async def hint_serialized(
@@ -555,17 +576,17 @@ class ChallengeEngine:
         owner_id: str | None = None,
     ) -> HintResult:
         async with self._session_lock(session_id):
-            self._owned(session_id, owner_id)
+            self._owned(session_id, owner_id, locked=True)
             return self.hint(session_id, language)
 
     async def reset_serialized(self, session_id: str, owner_id: str | None = None) -> SessionRecord:
         async with self._session_lock(session_id):
-            self._owned(session_id, owner_id)
+            self._owned(session_id, owner_id, locked=True)
             return self.reset(session_id)
 
     async def delete_serialized(self, session_id: str, owner_id: str | None = None) -> None:
         async with self._session_lock(session_id):
-            self._owned(session_id, owner_id)
+            self._owned(session_id, owner_id, locked=True)
             self.delete(session_id)
 
     def submit(self, session_id: str, candidate: str) -> SubmissionResult:
@@ -661,7 +682,7 @@ class ChallengeEngine:
     def player_overview(self, owner_id: str) -> dict[str, object]:
         active = []
         for stored in self.repository.active_sessions_for_owner(owner_id):
-            session = self.get_session(stored.id)
+            session = self._owned(stored.id, owner_id)
             if session.status is SessionStatus.ACTIVE:
                 active.append(
                     {
