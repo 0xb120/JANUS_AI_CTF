@@ -17,6 +17,9 @@ services:
     network_mode: !reset null
     ports:
       - "${JANUS_BIND_ADDRESS:-127.0.0.1}:${JANUS_PORT:-8000}:8000"
+    networks:
+      default:
+        aliases: [janus-upstream]
     depends_on: !override
       models:
         condition: service_completed_successfully

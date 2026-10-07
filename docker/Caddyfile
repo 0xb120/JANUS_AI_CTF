@@ -1,0 +1,20 @@
+(tls-acme) {
+	# Default: automatic Let's Encrypt certificate for JANUS_PUBLIC_HOST.
+}
+
+(tls-internal) {
+	tls internal
+}
+
+{$JANUS_PUBLIC_HOST} {
+	import tls-{$JANUS_TLS:acme}
+	encode zstd gzip
+	request_body {
+		max_size 25MB
+	}
+	reverse_proxy janus-upstream:8000 {
+		transport http {
+			read_timeout 120s
+		}
+	}
+}

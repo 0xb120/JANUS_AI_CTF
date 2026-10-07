@@ -1,0 +1,46 @@
+# Internet-facing multiplayer mode behind Caddy (automatic HTTPS):
+#   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+#   (add -f docker-compose.hf.yml for Hugging Face, -f docker-compose.gpu.yml for a GPU)
+#
+# Required in .env: JANUS_PUBLIC_HOST (DNS name pointing here), JANUS_ACCESS_CODES.
+# JANUS_TLS=internal uses Caddy's local CA instead of Let's Encrypt (tests, closed
+# networks). Only Caddy is published; JANUS trusts X-Forwarded-* from this network only.
+services:
+  ollama:
+    ports: !reset []
+
+  janus:
+    ports: !reset []
+    environment:
+      JANUS_ONLINE: "1"
+      JANUS_PUBLIC_HOST: ${JANUS_PUBLIC_HOST:?set JANUS_PUBLIC_HOST in .env}
+      JANUS_TRUSTED_PROXIES: ${JANUS_SUBNET:-172.30.57.0/24}
+      JANUS_ACCESS_CODES: ${JANUS_ACCESS_CODES:?set JANUS_ACCESS_CODES in .env}
+
+  caddy:
+    image: caddy:${CADDY_VERSION:-2}
+    restart: unless-stopped
+    depends_on:
+      janus:
+        condition: service_healthy
+    environment:
+      JANUS_PUBLIC_HOST: ${JANUS_PUBLIC_HOST}
+      JANUS_TLS: ${JANUS_TLS:-acme}
+    ports:
+      - "${JANUS_HTTP_PORT:-80}:80"
+      - "${JANUS_HTTPS_PORT:-443}:443"
+      - "${JANUS_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${JANUS_SUBNET:-172.30.57.0/24}
+
+volumes:
+  caddy-data:
+  caddy-config:

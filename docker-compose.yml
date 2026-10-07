@@ -37,6 +37,11 @@ services:
       - "${JANUS_BIND_ADDRESS:-127.0.0.1}:${JANUS_PORT:-8000}:8000"
     volumes:
       - ollama:/root/.ollama
+    networks:
+      default:
+        # Caddy (docker-compose.public.yml) reaches JANUS through this name:
+        # JANUS shares this service's network namespace.
+        aliases: [janus-upstream]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s

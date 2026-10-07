@@ -14,6 +14,11 @@ esac
 # Without an explicit URL each provider uses its own default (Ollama on
 # 127.0.0.1:11434, Hugging Face on its router).
 set -- ${JANUS_LLM_BASE_URL:+--llm-base-url "$JANUS_LLM_BASE_URL"} "$@"
+set -- ${JANUS_PUBLIC_HOST:+--public-host "$JANUS_PUBLIC_HOST"} \
+    ${JANUS_TRUSTED_PROXIES:+--trusted-proxies "$JANUS_TRUSTED_PROXIES"} "$@"
+case "${JANUS_ONLINE:-0}" in
+    1|true|yes) set -- --online "$@" ;;
+esac
 
 exec python -m janus \
     --config-dir /app/configs \
