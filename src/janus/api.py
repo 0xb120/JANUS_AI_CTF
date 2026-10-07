@@ -151,12 +151,16 @@ def create_app(
     @app.exception_handler(JanusError)
     async def janus_error_handler(request: Request, exc: JanusError) -> JSONResponse:
         del request
+        headers = {}
+        if "retry_after" in exc.details:
+            headers["Retry-After"] = str(exc.details["retry_after"])
         return JSONResponse(
             status_code=exc.status_code,
             content={
                 "detail": exc.message,
                 "error": {"code": exc.code, "message": exc.message, "details": exc.details},
             },
+            headers=headers,
         )
 
     prefix = config.app.api_prefix
