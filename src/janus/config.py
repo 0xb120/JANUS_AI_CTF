@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -45,6 +47,9 @@ class LLMSettings(StrictModel):
     max_tokens: int = Field(default=512, ge=16, le=8192)
     enable_thinking: bool = False
     fallback_to_mock: bool = True
+    # Global gate in front of the provider: concurrent calls and bounded waiting queue.
+    max_concurrent: int = Field(default=8, ge=1, le=256)
+    max_queue: int = Field(default=16, ge=0, le=10_000)
 
     @model_validator(mode="before")
     @classmethod
@@ -96,6 +101,54 @@ class SpeechSettings(StrictModel):
     max_audio_bytes: int = Field(default=20_000_000, ge=1024, le=200_000_000)
 
 
+_HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+
+
+class OnlineLimits(StrictModel):
+    auth_attempts_per_minute: int = Field(default=10, ge=1, le=1000)
+    turns_per_minute: int = Field(default=12, ge=1, le=1000)
+    sessions_per_hour: int = Field(default=20, ge=1, le=10_000)
+    max_active_sessions: int = Field(default=1, ge=1, le=10)
+
+
+class OnlineSettings(StrictModel):
+    """Internet-facing multiplayer mode; disabled keeps the local kiosk unchanged."""
+
+    enabled: bool = False
+    public_host: str | None = None
+    access_codes_env: str = "JANUS_ACCESS_CODES"
+    trusted_proxies: list[str] = Field(default_factory=list)
+    player_ttl_hours: int = Field(default=12, ge=1, le=168)
+    limits: OnlineLimits = Field(default_factory=OnlineLimits)
+
+    @field_validator("public_host")
+    @classmethod
+    def bare_hostname(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        host = value.strip().lower()
+        if not _HOSTNAME.fullmatch(host):
+            raise ValueError("public_host must be a bare hostname such as ctf.example.com")
+        return host
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def ip_networks_only(cls, value: list[str]) -> list[str]:
+        networks = []
+        for item in value:
+            try:
+                networks.append(str(ipaddress.ip_network(item.strip(), strict=False)))
+            except ValueError as exc:
+                raise ValueError(f"trusted_proxies entries must be IPs or CIDRs: {item!r}") from exc
+        return networks
+
+    @model_validator(mode="after")
+    def public_host_when_enabled(self) -> OnlineSettings:
+        if self.enabled and not self.public_host:
+            raise ValueError("online mode requires public_host")
+        return self
+
+
 class AppSettings(StrictModel):
     name: str = "JANUS // RomHack 2026"
     version: str = "0.1.0"
@@ -119,6 +172,18 @@ class AppSettings(StrictModel):
     )
     llm: LLMSettings = Field(default_factory=LLMSettings)
     speech: SpeechSettings = Field(default_factory=SpeechSettings)
+    online: OnlineSettings = Field(default_factory=OnlineSettings)
+
+    def effective_allowed_hosts(self) -> list[str]:
+        hosts = list(self.allowed_hosts)
+        if self.online.enabled and self.online.public_host not in hosts:
+            hosts.append(self.online.public_host)
+        return hosts
+
+    def effective_cors_origins(self) -> list[str]:
+        if self.online.enabled:
+            return [f"https://{self.online.public_host}"]
+        return list(self.cors_origins)
 
     @field_validator("api_prefix")
     @classmethod

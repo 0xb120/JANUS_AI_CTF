@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from janus.__main__ import main
-from janus.config import LLMSettings, load_config
+from janus.config import AppSettings, LLMSettings, OnlineLimits, OnlineSettings, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,3 +94,85 @@ def test_cli_keeps_the_configured_url_when_the_provider_is_unchanged(monkeypatch
     llm = _run_main_and_capture_config(monkeypatch, ["--llm-provider", "ollama"])
 
     assert llm.base_url == "http://127.0.0.1:11434"
+
+
+def test_online_mode_defaults_to_disabled_and_keeps_local_hosts():
+    config = load_config(ROOT / "configs")
+
+    assert config.app.online.enabled is False
+    assert config.app.online.limits == OnlineLimits()
+    assert config.app.effective_allowed_hosts() == config.app.allowed_hosts
+    assert config.app.effective_cors_origins() == config.app.cors_origins
+    assert (config.app.llm.max_concurrent, config.app.llm.max_queue) == (8, 16)
+
+
+def test_online_mode_requires_a_bare_public_host():
+    with pytest.raises(PydanticValidationError, match="requires public_host"):
+        OnlineSettings(enabled=True)
+    with pytest.raises(PydanticValidationError, match="bare hostname"):
+        OnlineSettings(enabled=True, public_host="https://ctf.example.com")
+
+
+def test_online_mode_exposes_only_the_public_origin():
+    app = AppSettings(online=OnlineSettings(enabled=True, public_host="CTF.Example.com"))
+
+    assert "ctf.example.com" in app.effective_allowed_hosts()
+    assert "127.0.0.1" in app.effective_allowed_hosts()
+    assert app.effective_cors_origins() == ["https://ctf.example.com"]
+
+
+def test_trusted_proxies_must_be_ip_networks():
+    online = OnlineSettings(trusted_proxies=["172.30.57.0/24", "10.0.0.5"])
+
+    assert online.trusted_proxies == ["172.30.57.0/24", "10.0.0.5/32"]
+    with pytest.raises(PydanticValidationError, match="trusted_proxies"):
+        OnlineSettings(trusted_proxies=["proxy.local"])
+
+
+def test_cli_enables_online_mode_and_wires_proxy_headers(monkeypatch):
+    import janus.__main__ as entrypoint
+
+    captured = {}
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "janus",
+            "--online",
+            "--public-host",
+            "ctf.example.com",
+            "--trusted-proxies",
+            "172.30.57.0/24",
+            "--host",
+            "0.0.0.0",
+        ],
+    )
+    monkeypatch.setattr(
+        entrypoint, "create_app", lambda loaded_config: captured.setdefault("config", loaded_config)
+    )
+    monkeypatch.setattr(
+        entrypoint.uvicorn, "run", lambda app, **kwargs: captured.setdefault("run", kwargs)
+    )
+    main()
+
+    online = captured["config"].app.online
+    assert online.enabled is True
+    assert online.public_host == "ctf.example.com"
+    assert online.trusted_proxies == ["172.30.57.0/24"]
+    assert captured["run"]["proxy_headers"] is True
+    assert captured["run"]["forwarded_allow_ips"] == "172.30.57.0/24"
+
+
+def test_cli_ignores_forwarded_headers_without_trusted_proxies(monkeypatch):
+    import janus.__main__ as entrypoint
+
+    captured = {}
+    monkeypatch.setattr(sys, "argv", ["janus"])
+    monkeypatch.setattr(entrypoint, "create_app", lambda loaded_config: object())
+    monkeypatch.setattr(
+        entrypoint.uvicorn, "run", lambda app, **kwargs: captured.setdefault("run", kwargs)
+    )
+    main()
+
+    assert captured["run"]["proxy_headers"] is False
+    assert "forwarded_allow_ips" not in captured["run"]

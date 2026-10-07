@@ -29,6 +29,8 @@ llm:
   max_tokens: 384
   enable_thinking: false
   fallback_to_mock: false
+  max_concurrent: 8
+  max_queue: 16
 speech:
   stt_provider: "faster_whisper"
   stt_model: "small"
@@ -41,3 +43,14 @@ speech:
   piper_model_en: "models/piper/en_US-lessac-medium.onnx"
   piper_use_cuda: false
   max_audio_bytes: 20000000
+online:
+  enabled: false
+  public_host: null
+  access_codes_env: "JANUS_ACCESS_CODES"
+  trusted_proxies: []
+  player_ttl_hours: 12
+  limits:
+    auth_attempts_per_minute: 10
+    turns_per_minute: 12
+    sessions_per_hour: 20
+    max_active_sessions: 1

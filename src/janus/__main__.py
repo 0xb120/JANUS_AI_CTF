@@ -8,7 +8,23 @@ from pathlib import Path
 import uvicorn
 
 from .api import create_app
-from .config import AppSettings, LLMSettings, SpeechSettings, load_config
+from .config import (
+    AppSettings,
+    LLMSettings,
+    LoadedConfig,
+    OnlineSettings,
+    SpeechSettings,
+    load_config,
+)
+
+
+def _proxy_options(config: LoadedConfig) -> dict[str, object]:
+    """Trust X-Forwarded-* only from the configured proxies, never by default."""
+
+    proxies = config.app.online.trusted_proxies
+    if not proxies:
+        return {"proxy_headers": False}
+    return {"proxy_headers": True, "forwarded_allow_ips": ",".join(proxies)}
 
 
 def main() -> None:
@@ -54,6 +70,18 @@ def main() -> None:
         ),
     )
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="Enable the Internet-facing multiplayer mode (requires --public-host and "
+        "JANUS_ACCESS_CODES).",
+    )
+    parser.add_argument("--public-host", default=None, help="Public DNS name, e.g. ctf.example.com")
+    parser.add_argument(
+        "--trusted-proxies",
+        default=None,
+        help="Comma-separated IPs/CIDRs whose X-Forwarded-* headers are trusted.",
+    )
     args = parser.parse_args()
     config_dir = args.config_dir or (Path(__file__).resolve().parents[2] / "configs")
     config = load_config(config_dir)
@@ -100,12 +128,30 @@ def main() -> None:
         app_updates["speech"] = SpeechSettings.model_validate(
             {**config.app.speech.model_dump(), **speech_updates}
         )
+    online_updates: dict[str, object] = {}
+    if args.online:
+        online_updates["enabled"] = True
+    if args.public_host is not None:
+        online_updates["public_host"] = args.public_host
+    if args.trusted_proxies is not None:
+        online_updates["trusted_proxies"] = [
+            item for item in args.trusted_proxies.split(",") if item.strip()
+        ]
+    if online_updates:
+        app_updates["online"] = OnlineSettings.model_validate(
+            {**config.app.online.model_dump(), **online_updates}
+        )
     if app_updates:
         validated_app = AppSettings.model_validate(
             {**config.app.model_dump(), **app_updates}
         )
         config = config.model_copy(update={"app": validated_app})
-    uvicorn.run(create_app(loaded_config=config), host=args.host, port=args.port)
+    uvicorn.run(
+        create_app(loaded_config=config),
+        host=args.host,
+        port=args.port,
+        **_proxy_options(config),
+    )
 
 
 if __name__ == "__main__":
