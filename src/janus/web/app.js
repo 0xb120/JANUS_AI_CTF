@@ -409,11 +409,19 @@
     const candidate = state.resumeCandidate;
     if (!candidate) return;
     try {
+      const me = await API.me();
+      const fresh = (me.active_sessions || []).find(item => item.id === candidate.id);
+      if (!fresh) {
+        els.resumeBanner.hidden = true;
+        state.resumeCandidate = null;
+        toast("La partita non è più disponibile.", "warning", 5000);
+        return;
+      }
       const [rawSession, history] = await Promise.all([API.getSession(candidate.id), API.history(candidate.id)]);
       state.sessionEpoch += 1;
       state.session = normalizeSession(rawSession, candidate.level_id, state.latestNickname);
       state.selectedLevelId = state.session.level_id;
-      enterGame({});
+      enterGame({ resumed: true });
       const messages = history.messages || [];
       for (const item of messages) {
         addMessage(item.role === "assistant" ? "assistant" : "user", item.content, { language: item.language });
@@ -421,14 +429,18 @@
       if (messages.some(item => item.content.includes("[REDACTED_SESSION_FLAG]"))) {
         addMessage("system", "Per sicurezza la flag non viene mai salvata: nella cronologia ripresa appare oscurata.");
       }
-      setTimerRemaining(candidate.remaining_seconds);
+      setTimerRemaining(fresh.remaining_seconds);
       els.resumeBanner.hidden = true;
       state.resumeCandidate = null;
     } catch (error) {
       if (error.status === 401) return showAccess("Accesso scaduto: rientra con il codice.");
-      els.resumeBanner.hidden = true;
-      state.resumeCandidate = null;
-      toast(error.status === 404 ? "La partita non è più disponibile." : error.message, "warning", 5000);
+      if (error.status === 404 || error.status === 409) {
+        els.resumeBanner.hidden = true;
+        state.resumeCandidate = null;
+        toast("La partita non è più disponibile.", "warning", 5000);
+      } else {
+        toast(error.message, "error", 5000);
+      }
     }
   }
 
@@ -975,6 +987,7 @@
     els.detectedLanguage.textContent = languageLabel(state.language);
     els.turnCount.textContent = padNumber(state.session.turn_count);
     els.hintCount.textContent = String(state.session.hints_used);
+    state.composerLockedUntil = 0;
     els.messageList.replaceChildren();
     els.messageInput.value = "";
     autoSizeComposer();
@@ -985,7 +998,9 @@
     const greeting = initialPayload.response_text ?? initialPayload.greeting ?? initialPayload.message ?? initialPayload.session?.greeting;
     addMessage(
       "system",
-      modeShowsTimer()
+      initialPayload.resumed
+        ? "Partita ripresa."
+        : modeShowsTimer()
         ? `Sessione inizializzata. Hai ${formatDuration(state.session.duration_seconds)} per ottenere e inviare la flag.`
         : "Sessione anonima inizializzata. Ottieni e invia la flag prima della scadenza del protocollo.",
     );
@@ -1006,7 +1021,7 @@
       return;
     }
 
-    addMessage("user", text);
+    const userBubble = addMessage("user", text);
     els.messageInput.value = "";
     autoSizeComposer();
     if (!setBusy(true, "JANUS STA ANALIZZANDO IL PROMPT")) return;
@@ -1029,6 +1044,7 @@
     } catch (error) {
       if (isCurrentSession(sessionId, epoch)) {
         if (["llm_busy", "rate_limited", "turn_in_progress"].includes(errorCode(error))) {
+          userBubble.remove();
           els.messageInput.value = text;
           autoSizeComposer();
         }
