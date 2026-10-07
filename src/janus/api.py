@@ -20,6 +20,7 @@ from .engine import ChallengeEngine
 from .errors import JanusError, NotFoundError, ValidationError
 from .providers.llm import (
     FallbackLLMProvider,
+    GatedLLMProvider,
     HuggingFaceProvider,
     LLMProvider,
     MockLLMProvider,
@@ -126,7 +127,11 @@ def create_app(
         config,
         repo,
         flag_service,
-        llm_provider or _build_llm(config),
+        GatedLLMProvider(
+            llm_provider or _build_llm(config),
+            max_concurrent=config.app.llm.max_concurrent,
+            max_queue=config.app.llm.max_queue,
+        ),
         stt_provider or _build_stt(config),
         tts_provider or _build_tts(config),
     )

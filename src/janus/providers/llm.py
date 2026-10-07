@@ -3,10 +3,13 @@ optional remote Hugging Face Inference Providers router."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
+import math
 import os
 import re
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Protocol
@@ -15,7 +18,7 @@ import httpx
 
 from ..config import LLMSettings
 from ..domain import ChatMessage, HealthComponent
-from ..errors import ProviderError
+from ..errors import CapacityError, ProviderError
 
 
 class LLMProvider(Protocol):
@@ -159,6 +162,65 @@ class FallbackLLMProvider:
             available=True,
             detail=f"fallback mock active; primary unavailable: {primary.detail}",
         )
+
+
+class GatedLLMProvider:
+    """Caps concurrent model calls and bounds the waiting queue across all sessions.
+
+    Waiters are served FIFO by the semaphore. When the queue is full the caller
+    gets CapacityError (HTTP 503) with a retry estimate instead of waiting forever.
+    """
+
+    def __init__(
+        self,
+        inner: LLMProvider,
+        *,
+        max_concurrent: int,
+        max_queue: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.inner = inner
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._max_concurrent = max_concurrent
+        self._max_queue = max_queue
+        self._clock = clock
+        self._waiting = 0
+        self._average_seconds = 5.0
+
+    @property
+    def waiting(self) -> int:
+        return self._waiting
+
+    def _retry_after(self) -> int:
+        estimate = self._average_seconds * (self._waiting + 1) / self._max_concurrent
+        return min(60, max(2, math.ceil(estimate)))
+
+    async def generate(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        if self._semaphore.locked() and self._waiting >= self._max_queue:
+            raise CapacityError(self._retry_after())
+        self._waiting += 1
+        try:
+            await self._semaphore.acquire()
+        finally:
+            self._waiting -= 1
+        started = self._clock()
+        try:
+            return await self.inner.generate(
+                messages, temperature=temperature, max_tokens=max_tokens
+            )
+        finally:
+            self._semaphore.release()
+            elapsed = self._clock() - started
+            self._average_seconds = 0.8 * self._average_seconds + 0.2 * elapsed
+
+    async def health(self) -> HealthComponent:
+        return await self.inner.health()
 
 
 class OpenAICompatibleProvider:

@@ -12,9 +12,10 @@ import pytest
 
 from janus.config import LLMSettings
 from janus.domain import ChatMessage, Language
-from janus.errors import ProviderError
+from janus.errors import CapacityError, ProviderError
 from janus.providers.llm import (
     FallbackLLMProvider,
+    GatedLLMProvider,
     HuggingFaceProvider,
     MockLLMProvider,
     OllamaProvider,
@@ -346,3 +347,83 @@ def test_piper_generates_bilingual_local_wav_and_rejects_traversal(tmp_path, mon
             assert wav_file.getnframes() == 200
     assert len(FakePiperVoice.loaded) == 2
     assert provider.resolve("../secret") is None
+
+
+class _HeldLLM:
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.active = 0
+        self.peak = 0
+
+    async def generate(self, messages, *, temperature, max_tokens):
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        await self.release.wait()
+        self.active -= 1
+        return "ok"
+
+    async def health(self):
+        from janus.domain import HealthComponent
+
+        return HealthComponent(available=True, detail="held")
+
+
+def test_gate_caps_concurrency_and_rejects_beyond_the_queue():
+    async def exercise():
+        inner = _HeldLLM()
+        gate = GatedLLMProvider(inner, max_concurrent=2, max_queue=1)
+        message = [ChatMessage(role="user", content="hi")]
+        running = [
+            asyncio.create_task(gate.generate(message, temperature=0.1, max_tokens=16))
+            for _ in range(3)
+        ]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert inner.active == 2
+        assert gate.waiting == 1
+        with pytest.raises(CapacityError) as raised:
+            await gate.generate(message, temperature=0.1, max_tokens=16)
+        assert 2 <= raised.value.details["retry_after"] <= 60
+        inner.release.set()
+        results = await asyncio.gather(*running)
+        assert results == ["ok", "ok", "ok"]
+        assert inner.peak == 2
+        assert gate.waiting == 0
+        assert (await gate.health()).detail == "held"
+
+    asyncio.run(exercise())
+
+
+def test_gate_releases_slots_when_the_provider_fails():
+    class Failing:
+        async def generate(self, messages, *, temperature, max_tokens):
+            raise ProviderError("down")
+
+        async def health(self):
+            raise AssertionError("unused")
+
+    async def exercise():
+        gate = GatedLLMProvider(Failing(), max_concurrent=1, max_queue=0)
+        for _ in range(3):
+            with pytest.raises(ProviderError):
+                await gate.generate([], temperature=0.1, max_tokens=16)
+
+    asyncio.run(exercise())
+
+
+def test_gate_cancellation_does_not_leak_queue_slots():
+    async def exercise():
+        inner = _HeldLLM()
+        gate = GatedLLMProvider(inner, max_concurrent=1, max_queue=1)
+        first = asyncio.create_task(gate.generate([], temperature=0.1, max_tokens=16))
+        await asyncio.sleep(0)
+        waiting = asyncio.create_task(gate.generate([], temperature=0.1, max_tokens=16))
+        await asyncio.sleep(0)
+        assert gate.waiting == 1
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        assert gate.waiting == 0
+        inner.release.set()
+        await first
+
+    asyncio.run(exercise())
