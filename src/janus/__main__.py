@@ -41,7 +41,15 @@ def main() -> None:
         default=None,
         help="Directory for the score database, HMAC key, and ephemeral audio.",
     )
-    parser.add_argument("--host", choices=["127.0.0.1", "localhost"], default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        choices=["127.0.0.1", "localhost", "0.0.0.0"],
+        default="127.0.0.1",
+        help=(
+            "Bind address. Use 0.0.0.0 only inside a container whose published "
+            "port is itself bound to the host loopback (see docker-compose.yml)."
+        ),
+    )
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     config_dir = args.config_dir or (Path(__file__).resolve().parents[2] / "configs")

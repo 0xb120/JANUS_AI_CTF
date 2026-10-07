@@ -28,6 +28,7 @@ offline sulla stessa macchina.
 - [Caratteristiche](#caratteristiche)
 - [Come funziona](#come-funziona)
 - [Quick start](#quick-start)
+- [Docker Compose](#docker-compose)
 - [Installazione completa](#installazione-completa)
 - [Supporto Windows / Linux](#supporto-windows--linux)
 - [Configurazione dei modelli](#configurazione-dei-modelli)
@@ -118,6 +119,21 @@ python3 -m venv .venv
 
 Lasciare il processo attivo e aprire `http://127.0.0.1:8000` nel browser. Demo
 è adatta allo sviluppo della UI, ma non rappresenta la configurazione evento.
+
+## Docker Compose
+
+In alternativa all'installazione sull'host, lo stack completo (Ollama, download
+dei modelli LLM e vocali, backend e kiosk) si avvia con Docker Compose su Linux
+o Docker Desktop:
+
+```bash
+docker compose up -d --build
+```
+
+Quando `docker compose ps` mostra `janus` come `healthy`, aprire
+`http://127.0.0.1:8000`. Per GPU NVIDIA aggiungere
+`-f docker-compose.yml -f docker-compose.gpu.yml`. Modalità, modello e voci si
+configurano tramite `.env`; dettagli in [docs/DOCKER.md](docs/DOCKER.md).
 
 ## Installazione completa
 
@@ -445,6 +461,7 @@ il [runbook operativo](docs/EVENT_RUNBOOK.md) e il documento di
 JANUS_AI_CTF/
 ├── configs/                 # Applicazione, modalità, hardware e livelli
 ├── .github/workflows/       # Verifica automatica su GitHub Actions
+├── docker/                  # Entrypoint e provisioning modelli per i container
 ├── docs/                    # Architettura, sicurezza e runbook
 ├── scripts/                 # Helper Windows e utility Python multipiattaforma
 ├── src/janus/               # Backend, provider e frontend kiosk
@@ -454,6 +471,9 @@ JANUS_AI_CTF/
 ├── JANUS_DEMO.cmd           # Demo Windows senza modelli
 ├── JANUS_STAND.cmd          # Modalità anonima Windows
 ├── JANUS_ARENA.cmd          # Modalità competitiva Windows
+├── Dockerfile               # Immagine backend/kiosk
+├── docker-compose.yml       # Stack completo Ollama + modelli + JANUS
+├── docker-compose.gpu.yml   # Override GPU NVIDIA per Ollama
 └── pyproject.toml           # Packaging e dipendenze
 ```
 
@@ -466,6 +486,7 @@ JANUS_AI_CTF/
   operative;
 - [Sicurezza](docs/SECURITY.md) — modello di sicurezza e limiti del kiosk;
 - [Profili hardware](docs/HARDWARE_PROFILES.md) — baseline e fallback;
+- [Docker Compose](docs/DOCKER.md) — stack containerizzato, volumi e variabili;
 - [Sintesi tecnica PDF](docs/JANUS_Sintesi_Tecnica.pdf).
 
 ## Contribuire

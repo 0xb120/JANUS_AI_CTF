@@ -36,3 +36,19 @@ jobs:
 
       - name: Test
         run: python -m pytest
+
+  container:
+    name: Docker image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate compose files
+        run: |
+          docker compose config -q
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config -q
+
+      - name: Build image
+        run: docker compose build janus

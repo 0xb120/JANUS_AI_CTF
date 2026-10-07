@@ -1,0 +1,9 @@
+# Allowlist: only what the image needs. Models and runtime data stay out.
+*
+!pyproject.toml
+!src/
+!configs/
+!scripts/prepare_speech_model.py
+!docker/
+**/__pycache__
+**/*.py[cod]

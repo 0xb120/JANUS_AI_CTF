@@ -1,0 +1,100 @@
+# JANUS full stack: Ollama + model provisioning + JANUS backend/kiosk UI.
+#
+#   docker compose up -d --build        # first run downloads all models
+#   open http://127.0.0.1:8000
+#
+# Network design: JANUS joins Ollama's network namespace, so the LLM stays on
+# 127.0.0.1:11434 exactly as on a bare-metal kiosk (config.py only accepts
+# loopback LLM URLs) and Ollama is never published. The JANUS port is published
+# by the ollama service, bound to the host loopback by default.
+#
+# All settings below can be overridden from a `.env` file next to this one
+# (see .env.example). For an NVIDIA GPU add `-f docker-compose.gpu.yml`.
+
+name: janus
+
+x-janus-image: &janus-image
+  build: .
+  image: janus:local
+
+x-speech-env: &speech-env
+  JANUS_STT_PROVIDER: ${JANUS_STT_PROVIDER:-faster_whisper}
+  JANUS_STT_MODEL: ${JANUS_STT_MODEL:-small}
+  JANUS_TTS_PROVIDER: ${JANUS_TTS_PROVIDER:-piper}
+  JANUS_PIPER_VOICE_IT: ${JANUS_PIPER_VOICE_IT:-it_IT-paola-medium}
+  JANUS_PIPER_VOICE_EN: ${JANUS_PIPER_VOICE_EN:-en_US-lessac-medium}
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-24h}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+    ports:
+      # Published on behalf of the janus service, which shares this namespace.
+      - "${JANUS_BIND_ADDRESS:-127.0.0.1}:${JANUS_PORT:-8000}:8000"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ollama-pull:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    network_mode: service:ollama
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+    entrypoint: ["ollama", "pull", "${JANUS_LLM_MODEL:-qwen3:4b-instruct}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  models:
+    <<: *janus-image
+    entrypoint: ["/app/docker/prepare-models.sh"]
+    healthcheck:
+      disable: true
+    environment:
+      <<: *speech-env
+    volumes:
+      - speech-models:/models
+    restart: "no"
+
+  janus:
+    <<: *janus-image
+    network_mode: service:ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+      models:
+        condition: service_completed_successfully
+    environment:
+      <<: *speech-env
+      JANUS_MODE: ${JANUS_MODE:-stand}
+      JANUS_LLM_PROVIDER: ${JANUS_LLM_PROVIDER:-ollama}
+      JANUS_LLM_MODEL: ${JANUS_LLM_MODEL:-qwen3:4b-instruct}
+      JANUS_SECRET_KEY: ${JANUS_SECRET_KEY:-}
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - janus-data:/data
+      - speech-models:/models:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  ollama:
+  speech-models:
+  janus-data:
