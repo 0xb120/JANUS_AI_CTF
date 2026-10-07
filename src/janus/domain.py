@@ -57,6 +57,8 @@ class SessionRecord(BaseModel):
     processing_seconds: float = 0.0
     score: int | None = None
     last_language: Language | None = None
+    # Online mode only. Never serialized: API clients must not learn player ids.
+    owner_id: str | None = Field(default=None, exclude=True)
 
 
 class MessageRecord(BaseModel):

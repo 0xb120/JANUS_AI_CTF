@@ -62,7 +62,8 @@ class SQLiteRepository:
                     hints_used INTEGER NOT NULL DEFAULT 0,
                     processing_seconds REAL NOT NULL DEFAULT 0,
                     score INTEGER,
-                    last_language TEXT
+                    last_language TEXT,
+                    owner_id TEXT
                 );
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +78,11 @@ class SQLiteRepository:
                     ON messages(session_id, id);
                 CREATE INDEX IF NOT EXISTS idx_sessions_leaderboard
                     ON sessions(level_id, status, score DESC);
+                CREATE TABLE IF NOT EXISTS players (
+                    id TEXT PRIMARY KEY,
+                    recovery_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             columns = {
@@ -86,6 +92,11 @@ class SQLiteRepository:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN processing_seconds REAL NOT NULL DEFAULT 0"
                 )
+            if "owner_id" not in columns:
+                connection.execute("ALTER TABLE sessions ADD COLUMN owner_id TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id, status)"
+            )
             # Only completed ranked results survive a process restart. Active
             # conversations, Stand sessions, and transcripts are ephemeral.
             connection.execute(
@@ -110,6 +121,7 @@ class SQLiteRepository:
             processing_seconds=row["processing_seconds"],
             score=row["score"],
             last_language=(Language(row["last_language"]) if row["last_language"] else None),
+            owner_id=row["owner_id"],
         )
 
     def create_session(self, session: SessionRecord) -> SessionRecord:
@@ -119,8 +131,8 @@ class SQLiteRepository:
                 """
                 INSERT INTO sessions
                     (id, mode_id, level_id, nickname, status, started_at, completed_at,
-                     turn_count, hints_used, processing_seconds, score, last_language)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     turn_count, hints_used, processing_seconds, score, last_language, owner_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.id,
@@ -135,6 +147,7 @@ class SQLiteRepository:
                     session.processing_seconds,
                     session.score,
                     session.last_language.value if session.last_language else None,
+                    session.owner_id,
                 ),
             )
             connection.commit()
@@ -335,6 +348,113 @@ class SQLiteRepository:
             hints_used=row["hints_used"],
             completed_at=datetime.fromisoformat(row["completed_at"]),
         )
+
+    def create_player(self, player_id: str, recovery_hash: str, created_at: datetime) -> None:
+        connection = self._connect()
+        try:
+            connection.execute(
+                "INSERT INTO players (id, recovery_hash, created_at) VALUES (?, ?, ?)",
+                (player_id, recovery_hash, created_at.isoformat()),
+            )
+            connection.commit()
+        finally:
+            self._close(connection)
+
+    def find_player_by_recovery_hash(self, recovery_hash: str) -> tuple[str, datetime] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT id, created_at FROM players WHERE recovery_hash = ?", (recovery_hash,)
+            ).fetchone()
+        finally:
+            self._close(connection)
+        if row is None:
+            return None
+        return row["id"], datetime.fromisoformat(row["created_at"])
+
+    def delete_players_created_before(self, cutoff: datetime) -> int:
+        connection = self._connect()
+        try:
+            cursor = connection.execute(
+                "DELETE FROM players WHERE created_at < ?", (cutoff.isoformat(),)
+            )
+            connection.commit()
+        finally:
+            self._close(connection)
+        return cursor.rowcount
+
+    def active_sessions_for_owner(self, owner_id: str) -> list[SessionRecord]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT * FROM sessions WHERE owner_id = ? AND status = 'active'
+                ORDER BY started_at ASC
+                """,
+                (owner_id,),
+            ).fetchall()
+        finally:
+            self._close(connection)
+        return [self._session_from_row(row) for row in rows]
+
+    def active_session_ids(self) -> list[str]:
+        connection = self._connect()
+        try:
+            rows = connection.execute("SELECT id FROM sessions WHERE status = 'active'").fetchall()
+        finally:
+            self._close(connection)
+        return [row["id"] for row in rows]
+
+    def nickname_taken_by_other(self, nickname: str, owner_id: str) -> bool:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT nickname FROM sessions
+                WHERE nickname IS NOT NULL AND owner_id IS NOT NULL AND owner_id != ?
+                """,
+                (owner_id,),
+            ).fetchall()
+        finally:
+            self._close(connection)
+        # Python casefold matches the leaderboard's identity rule, including non-ASCII.
+        wanted = nickname.casefold()
+        return any(row["nickname"].casefold() == wanted for row in rows)
+
+    def latest_nickname_for_owner(self, owner_id: str) -> str | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT nickname FROM sessions WHERE owner_id = ? AND nickname IS NOT NULL
+                ORDER BY started_at DESC LIMIT 1
+                """,
+                (owner_id,),
+            ).fetchone()
+        finally:
+            self._close(connection)
+        return row["nickname"] if row else None
+
+    def list_messages(self, session_id: str) -> list[MessageRecord]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC", (session_id,)
+            ).fetchall()
+        finally:
+            self._close(connection)
+        return [
+            MessageRecord(
+                id=row["id"],
+                session_id=row["session_id"],
+                role=row["role"],
+                content=row["content"],
+                language=Language(row["language"]),
+                modality=InputModality(row["modality"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
 
     def close(self) -> None:
         if self._memory_connection is not None:
