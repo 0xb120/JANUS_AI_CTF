@@ -138,6 +138,19 @@ configurano tramite `.env`; per usare Hugging Face al posto di Ollama
 aggiungere `-f docker-compose.yml -f docker-compose.hf.yml`. Dettagli in
 [docs/DOCKER.md](docs/DOCKER.md).
 
+### Gioco online multi-giocatore
+
+Per esporre JANUS su Internet (10–50 giocatori, accesso con codice evento,
+HTTPS automatico tramite Caddy), impostare `JANUS_PUBLIC_HOST` e
+`JANUS_ACCESS_CODES` in `.env` e avviare:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+```
+
+Vale anche con gli override HF e GPU. Per il backend consigliato, la variante con
+proxy esterno e la capacità vedere [docs/DOCKER.md](docs/DOCKER.md#modalità-online-su-internet).
+
 ## Installazione completa
 
 ### Prerequisiti comuni
@@ -538,6 +551,7 @@ JANUS_AI_CTF/
 ├── docker-compose.yml       # Stack completo Ollama + modelli + JANUS
 ├── docker-compose.gpu.yml   # Override GPU NVIDIA per Ollama
 ├── docker-compose.hf.yml    # Override Hugging Face al posto di Ollama
+├── docker-compose.public.yml # Override online su Internet con Caddy
 └── pyproject.toml           # Packaging e dipendenze
 ```
 

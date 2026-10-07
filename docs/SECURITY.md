@@ -49,7 +49,8 @@ flowchart LR
 
 ### Rete
 
-- La CLI accetta soltanto 127.0.0.1 o localhost.
+- La CLI accetta soltanto 127.0.0.1 o localhost; 0.0.0.0 è ammesso solo in un
+  container o dietro un proxy (modalità online, vedere sotto).
 - Start-Janus forza 127.0.0.1.
 - Gli URL LLM devono avere host 127.0.0.1, localhost o ::1, salvo il provider
   opzionale `huggingface`, vincolato a `https://router.huggingface.co`.
@@ -89,8 +90,8 @@ Con `llm.provider: huggingface` il perimetro cambia:
 - I formati temporanei sono ridotti a WAV, WebM, Ogg, MP3, M4A/MP4 o bin.
 - Nickname: 2–24 caratteri, alfanumerici, spazio, underscore, punto e trattino.
 
-Non sono implementati rate limiting server-side o un limite globale di
-concorrenza. La UI disabilita i controlli durante un turno, ma questo non
+In modalità locale non sono implementati rate limiting server-side o un limite
+globale di concorrenza (in modalità online sì, vedere sotto). La UI disabilita i controlli durante un turno, ma questo non
 protegge da richieste costruite direttamente. Per l'evento l'API deve restare
 irraggiungibile dalla rete e il kiosk deve essere presidiato.
 
@@ -160,6 +161,123 @@ Le sessioni Score vinte conservano:
 
 Non conservano la conversazione dopo la vittoria. Stand non lascia risultati
 dopo la chiusura normale o il riavvio.
+
+## Modalità online (Internet)
+
+Con `online.enabled: true` (`--online` o `JANUS_ONLINE=1`) JANUS può essere
+esposto su Internet per 10–50 giocatori contemporanei. Il perimetro cambia:
+i client non sono più presidiati, il TLS è terminato da un proxy (Caddy nello
+stack, o un proxy esterno) e l'applicazione impone da sola accesso, proprietà
+delle risorse e limiti. Deployment in [DOCKER.md](DOCKER.md#modalità-online-su-internet).
+Con la modalità disattivata il comportamento resta quello del kiosk locale.
+
+### Accesso e identità
+
+- **Codici evento:** letti solo dall'ambiente (`JANUS_ACCESS_CODES`, separati
+  da virgola, almeno 8 caratteri ciascuno), mai da YAML o repository. Il
+  confronto è a tempo costante contro ogni codice configurato. Si ruotano
+  aggiornando `.env` e lanciando `docker compose up -d`.
+- **Cookie `janus_player`:** `v1.<player_id>.<scadenza>.<firma>`, con firma
+  HMAC-SHA256 derivata dalla chiave master con separazione di dominio rispetto
+  alle flag. Attributi: `HttpOnly; Secure; SameSite=Strict; Path=/`. La verifica
+  è senza stato (firma e scadenza) e il cookie non è mai letto da JavaScript.
+  La scadenza è assoluta: `player_ttl_hours` (default 12) dalla creazione del
+  giocatore.
+- **Codice di recupero:** `RCV-XXXX-XXXX-XXXX-XXXX`, 80 bit casuali, mostrato
+  una sola volta alla creazione. Nel database resta solo l'hash SHA-256.
+  Permette di riprendere su un altro dispositivo con lo stesso giocatore e non
+  prolunga la scadenza. Se perso, il giocatore rientra con un nuovo accesso.
+- Un 401 da `/api/join` e `/api/recover` non distingue la causa (codice errato,
+  giocatore scaduto).
+- **Logout senza stato:** `POST /api/logout` cancella il cookie su quel
+  dispositivo, ma un cookie rubato resta valido fino alla scadenza
+  (`player_ttl_hours`).
+- **Limite noto:** chiunque conosca il codice evento può creare nuove identità
+  di giocatore. Il danno è limitato dal cancello globale sull'LLM e dalla
+  rotazione del codice.
+
+### Proprietà delle risorse
+
+Ogni sessione ha un `owner_id`. Tutti gli endpoint di sessione e
+`GET /api/audio/{id}` verificano il proprietario in un'unica funzione del
+motore. Senza cookie la risposta è 401; con la risorsa di un altro giocatore la
+risposta è 404, identica a quella di una risorsa inesistente, senza effetti.
+`GET /api/config` e `GET /api/leaderboard` restano pubblici. In modalità score
+un nickname già usato da un altro giocatore (confronto senza maiuscole) dà 409
+`nickname_taken`: la classifica non fonde giocatori distinti.
+
+Un giocatore ha al massimo una sessione attiva: crearne una nuova chiude la
+precedente. La creazione è serializzata per giocatore e le letture durante un
+turno in corso non fanno scadere la sessione.
+
+### Limiti e cancello LLM
+
+| Limite | Chiave | Default | Endpoint |
+| --- | --- | --- | --- |
+| `auth_attempts_per_minute` | IP | 10 | `/api/join`, `/api/recover` |
+| `turns_per_minute` | giocatore | 12 | messaggi e voce |
+| `sessions_per_hour` | giocatore | 20 | creazione e reset di sessioni |
+| `max_active_sessions` | giocatore | 1 | sessioni attive contemporanee |
+
+- Il limite sugli accessi conta **solo i tentativi falliti** per IP. Superato
+  il limite, tutti i tentativi da quell'IP (anche corretti) sono bloccati fino
+  alla fine della finestra di 60 s: i giocatori dietro uno stesso NAT possono
+  entrare insieme finché non sbagliano.
+- Al superamento: 429 `rate_limited` con `details.retry_after` e header
+  `Retry-After`.
+- Un solo turno alla volta per sessione: un secondo turno mentre il primo è in
+  corso riceve 409 `turn_in_progress`.
+- **Cancello LLM:** `llm.max_concurrent` (default 8) chiamate simultanee e
+  `llm.max_queue` (default 16) in attesa, in ordine FIFO. A coda piena: 503
+  `llm_busy` con `Retry-After`. Un turno rifiutato con `llm_busy` viene annullato
+  (rollback): non costa un turno e non lascia messaggi, quindi riprovare è
+  gratuito. Il tempo in coda non è addebitato al giocatore.
+- I contatori e i lock sono in memoria: con più repliche i limiti non sono
+  condivisi. JANUS online supporta una sola istanza.
+
+### HTTPS, HSTS e proxy
+
+- Una richiesta con schema effettivo non `https` riceve 400 `https_required`;
+  le risposte HTTPS portano `Strict-Transport-Security: max-age=31536000`.
+- L'eccezione vale solo per un client locale **diretto**: loopback senza
+  `Forwarded`, `X-Forwarded-For` o `X-Forwarded-Proto`, che è il modo in cui
+  l'healthcheck del container raggiunge JANUS.
+- Gli header `X-Forwarded-*` sono accettati solo dagli indirizzi in
+  `--trusted-proxies` / `JANUS_TRUSTED_PROXIES`. Con `docker-compose.public.yml`
+  è solo l'indirizzo fisso di Caddy (`JANUS_CADDY_IP`, default `172.30.57.10`,
+  dentro `JANUS_SUBNET`), non l'intera rete: altri container non possono
+  falsificare IP e schema.
+- Un proxy sullo stesso host **deve** essere elencato in
+  `JANUS_TRUSTED_PROXIES`, altrimenti ogni client appare locale ai limiti
+  (esenzione da HTTPS e da health completo inclusa). JANUS registra un avviso
+  all'avvio se la modalità online parte senza proxy fidati.
+- `allowed_hosts` include `public_host`; CORS accetta solo
+  `https://<public_host>`.
+
+### Health ridotto
+
+In modalità online `/api/health` senza cookie valido e da un client non locale
+diretto restituisce solo `{status, version}`, senza i componenti (provider,
+modelli, percorsi).
+
+### Log di accesso e privacy
+
+- Il log di accesso di uvicorn registra IP e percorsi, che contengono gli ID di
+  sessione. È attivo di default e `python -m janus` non espone l'opzione
+  `--no-access-log` di uvicorn: per ridurlo limitare la retention dei log del
+  container (driver di logging Docker con `max-size`/`max-file`).
+- Caddy non scrive log di accesso finché nel `docker/Caddyfile` non si aggiunge
+  una direttiva `log`: non aggiungerla, oppure limitarne i campi, se non serve.
+- I dati dei giocatori (riga `players` con hash del recupero) vivono
+  `player_ttl_hours`; gli IP dei client restano solo in memoria per la finestra
+  del limite. Informare i giocatori che i messaggi sono elaborati dall'LLM
+  configurato e, con Hugging Face, da un servizio esterno.
+
+### Chiave master
+
+Non ruotare `JANUS_SECRET_KEY` (né eliminare `janus.key`) a evento in corso: la
+chiave firma sia le flag sia i cookie giocatore. Cambiarla invalida tutti i
+cookie e le flag delle sessioni attive.
 
 ## Provider mock
 

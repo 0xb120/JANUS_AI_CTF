@@ -106,6 +106,143 @@ docker-compose.hf.yml down`, quindi `docker compose up -d` (togliendo
 `COMPOSE_FILE` da `.env` se impostato). Implicazioni su privacy e costi in
 [SECURITY.md](SECURITY.md#inferenza-remota-hugging-face-opzionale).
 
+## Modalità online su Internet
+
+Per far giocare 10–50 persone da dispositivi propri, JANUS ha una modalità
+online (`online.enabled`) con accesso tramite codice evento, sessioni legate al
+giocatore, limiti e cancello sull'LLM. L'applicazione implementa le regole; il
+proxy si occupa solo del TLS. Il modello di sicurezza è in
+[SECURITY.md](SECURITY.md#modalità-online-internet).
+
+### Variante A: Caddy nello stack
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+```
+
+L'override si combina con gli altri:
+
+```bash
+# Hugging Face
+docker compose -f docker-compose.yml -f docker-compose.hf.yml -f docker-compose.public.yml up -d --build
+# GPU NVIDIA
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.public.yml up -d --build
+```
+
+Variabili in `.env`:
+
+| Variabile | Default | Effetto |
+| --- | --- | --- |
+| `JANUS_PUBLIC_HOST` | obbligatoria | Nome DNS pubblico (solo hostname, es. `ctf.example.com`) |
+| `JANUS_ACCESS_CODES` | obbligatoria | Codici evento separati da virgola, almeno 8 caratteri ciascuno |
+| `JANUS_TLS` | `acme` | `acme`: certificato Let's Encrypt automatico; `internal`: CA locale di Caddy (test, reti chiuse) |
+| `JANUS_HTTP_PORT` | `80` | Porta HTTP pubblicata da Caddy |
+| `JANUS_HTTPS_PORT` | `443` | Porta HTTPS pubblicata da Caddy (TCP e UDP) |
+| `JANUS_SUBNET` | `172.30.57.0/24` | Subnet della rete Compose |
+| `JANUS_CADDY_IP` | `172.30.57.10` | Indirizzo fisso di Caddy; deve ricadere in `JANUS_SUBNET` |
+| `CADDY_VERSION` | `2` | Tag dell'immagine `caddy` |
+
+Requisiti:
+
+- un record DNS (A/AAAA) per `JANUS_PUBLIC_HOST` che punti all'host;
+- con `JANUS_TLS=acme` le porte pubbliche 80 e 443 devono essere raggiungibili
+  da Internet (sfida ACME): `JANUS_HTTP_PORT` e `JANUS_HTTPS_PORT` diversi dai
+  default servono solo con `JANUS_TLS=internal` o con porte rimappate a monte;
+- con `JANUS_TLS=internal` il browser mostra un avviso finché non si installa
+  la CA locale di Caddy.
+
+```mermaid
+flowchart LR
+    B[Browser] -->|HTTPS :443| C[Caddy]
+    C -->|HTTP, X-Forwarded-*| U[janus-upstream:8000]
+    U --> J[janus]
+```
+
+Solo Caddy è pubblicato: la porta 8000 non è esposta sull'host. L'alias di rete
+`janus-upstream` è definito su `ollama` (`docker-compose.yml`) o su `janus`
+(`docker-compose.hf.yml`), a seconda di quale servizio possiede la porta di
+JANUS. JANUS si fida di `X-Forwarded-*` solo dall'indirizzo fisso
+`JANUS_CADDY_IP` (`JANUS_TRUSTED_PROXIES`), non dall'intera rete: gli altri
+container non possono falsificare l'IP del client. Caddy limita il body a 25 MB
+e il timeout di lettura a 120 s (`docker/Caddyfile`).
+
+### Variante B: proxy o CDN esterno
+
+JANUS viene pubblicato su un indirizzo interno e il proxy esterno termina il TLS.
+In `.env`:
+
+```dotenv
+JANUS_BIND_ADDRESS=10.0.0.5          # indirizzo interno raggiungibile dal proxy
+JANUS_ONLINE=1
+JANUS_PUBLIC_HOST=ctf.example.com
+JANUS_TRUSTED_PROXIES=10.0.0.2       # IP/CIDR del proxy
+JANUS_ACCESS_CODES=codice-uno,codice-due
+```
+
+Requisiti per il proxy:
+
+- inoltrare `Host` e impostare `X-Forwarded-For` e `X-Forwarded-Proto: https`;
+- limite sul body di almeno 20 MB (audio vocale);
+- timeout di lettura di almeno 120 s (turni LLM lenti).
+
+`JANUS_TRUSTED_PROXIES` è obbligatoria: senza di essa JANUS ignora gli header
+inoltrati, vede ogni client come l'IP del proxy (rate limit condiviso da tutti)
+e registra un avviso all'avvio. Un proxy sullo stesso host va elencato come gli
+altri: altrimenti ogni client sembra locale ai limiti.
+
+Esempio nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ctf.example.com;
+    # ssl_certificate ... ; ssl_certificate_key ... ;
+
+    client_max_body_size 25m;
+
+    location / {
+        proxy_pass http://10.0.0.5:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 120s;
+    }
+}
+```
+
+### Capacità per backend
+
+Il cancello globale sull'LLM (`llm.max_concurrent`, `llm.max_queue` in
+`configs/app.yaml`, default 8 e 16) limita le chiamate simultanee; oltre la
+coda JANUS risponde 503 `llm_busy` con `Retry-After`.
+
+| Backend | Impostazione consigliata | Misura |
+| --- | --- | --- |
+| Hugging Face | `llm.max_concurrent` 8–16 | 8 giocatori concorrenti in 4,6 s complessivi, 0,7–3,6 s per turno |
+| Ollama con GPU | `OLLAMA_NUM_PARALLEL` = `llm.max_concurrent` | non misurato |
+| Ollama su CPU | sconsigliato oltre 2–3 giocatori | 4 giocatori: turni fino a 38,7 s (16 core, senza GPU) |
+
+Per l'online si raccomanda Hugging Face o una GPU. Prima dell'evento provare il
+carico con `scripts/online_load_test.py` (vedere
+[EVENT_RUNBOOK.md](EVENT_RUNBOOK.md#evento-online)):
+
+```bash
+python scripts/online_load_test.py --base-url https://ctf.example.com --players 50
+# con JANUS_TLS=internal (es. JANUS_HTTPS_PORT=8443), fidandosi della CA locale di Caddy:
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+python scripts/online_load_test.py --base-url https://127.0.0.1:8443 \
+  --host-header ctf.example.com --ca-file ./caddy-root.crt --players 50
+```
+
+(`JANUS_ACCESS_CODES` viene letta dall'ambiente, oppure `--access-code`.)
+
+### Rotazione dei codici e log
+
+Per ruotare il codice evento aggiornare `JANUS_ACCESS_CODES` in `.env` e
+lanciare `docker compose up -d`. I log di accesso di JANUS e di Caddy
+contengono IP e ID di sessione nei percorsi: per ridurli si veda
+[SECURITY.md](SECURITY.md#log-di-accesso-e-privacy).
+
 ## Configurazione
 
 Compose legge un file `.env` nella root del repository. Tutte le variabili sono
@@ -129,6 +266,14 @@ facoltative; `.env.example` riporta l'elenco completo.
 | `OLLAMA_VERSION` | `latest` | Tag dell'immagine `ollama/ollama` |
 | `OLLAMA_KEEP_ALIVE` | `24h` | Tempo di permanenza del modello in memoria |
 | `OLLAMA_NUM_PARALLEL` | `1` | Richieste LLM servite in parallelo |
+| `JANUS_ONLINE` | `0` | `1` abilita la modalità online (impostata da `docker-compose.public.yml`) |
+| `JANUS_PUBLIC_HOST` | vuoto | Hostname pubblico (online; obbligatoria con l'override public) |
+| `JANUS_ACCESS_CODES` | vuoto | Codici evento separati da virgola (online; obbligatoria con l'override public) |
+| `JANUS_TRUSTED_PROXIES` | vuoto | IP/CIDR dei proxy di cui fidarsi per `X-Forwarded-*` |
+| `JANUS_TLS` | `acme` | `acme` oppure `internal` (override public) |
+| `JANUS_HTTP_PORT` / `JANUS_HTTPS_PORT` | `80` / `443` | Porte pubblicate da Caddy |
+| `JANUS_SUBNET` / `JANUS_CADDY_IP` | `172.30.57.0/24` / `172.30.57.10` | Subnet Compose e indirizzo fisso di Caddy |
+| `CADDY_VERSION` | `2` | Tag dell'immagine `caddy` |
 
 Dopo aver cambiato modello o voci è sufficiente `docker compose up -d`: i
 servizi one-shot scaricano solo ciò che manca.
@@ -166,9 +311,10 @@ scaricati solo dal servizio `models`.
 
 Per impostazione predefinita la porta è pubblicata solo su `127.0.0.1`, in
 linea con il modello di sicurezza kiosk. Impostare `JANUS_BIND_ADDRESS=0.0.0.0`
-rende JANUS raggiungibile dalla rete, ma l'applicazione non ha autenticazione né
-rate limiting e `TrustedHostMiddleware` accetta solo gli host di
-`configs/app.yaml`: valutare [SECURITY.md](SECURITY.md) prima di farlo.
+rende JANUS raggiungibile dalla rete, ma senza modalità online l'applicazione non
+ha autenticazione né rate limiting e `TrustedHostMiddleware` accetta solo gli
+host di `configs/app.yaml`: valutare [SECURITY.md](SECURITY.md) prima di farlo.
+Per l'esposizione su Internet usare la modalità online descritta sopra.
 
 ## Diagnostica
 

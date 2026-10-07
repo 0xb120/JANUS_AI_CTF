@@ -21,6 +21,11 @@ flowchart LR
     L -. alternativa .-> C[Server OpenAI-compatible]
 ~~~
 
+Con la modalità online (opzionale, `online.enabled`) la stessa applicazione può
+essere esposta su Internet dietro un proxy TLS per più giocatori contemporanei;
+le sezioni seguenti segnalano le differenze. Il resto del documento descrive il
+kiosk locale.
+
 Il percorso operativo predefinito è Ollama con qwen3:4b-instruct. Un server
 OpenAI-compatible, per esempio llama.cpp con un GGUF scelto esplicitamente, resta
 un'alternativa avanzata. Il provider mock è riservato a DEMO e test.
@@ -103,7 +108,21 @@ vengono cancellati; l'abbandono elimina l'intera sessione. Una sessione Score
 vinta non può essere eliminata tramite l'endpoint pubblico.
 
 La leaderboard conserva il miglior risultato per coppia nickname/level,
-considerando il nickname senza differenze tra maiuscole e minuscole. Ordina per
+considerando il nickname senza differenze tra maiuscole e minuscole.
+
+Per la modalità online la persistenza aggiunge:
+
+- la colonna `sessions.owner_id` (NULL in locale, indicizzata con `status`),
+  aggiunta con `ALTER TABLE` idempotente;
+- la tabella `players`:
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `id` | TEXT, chiave primaria | UUID del giocatore |
+| `recovery_hash` | TEXT, univoco | SHA-256 del codice di recupero normalizzato |
+| `created_at` | TEXT | Origine della scadenza (`player_ttl_hours`) |
+
+Il codice di recupero in chiaro non è mai conservato. Ordina per
 score decrescente, completamento più antico e minor numero di turni.
 
 ### Provider LLM
@@ -131,6 +150,34 @@ Il thinking di Qwen è disabilitato tramite think false per Ollama e
 chat_template_kwargs.enable_thinking false per OpenAI-compatible; verso il
 router Hugging Face il campo non viene inviato, perché non tutti gli
 operatori lo supportano.
+
+### GatedLLMProvider
+
+`GatedLLMProvider` avvolge il provider reale in `_build_llm` (anche mock e
+fallback), quindi è attivo in entrambe le modalità; con un solo utente non
+scatta mai. Un semaforo limita le chiamate simultanee a `llm.max_concurrent`
+(default 8); le richieste in attesa sono servite in ordine FIFO fino a
+`llm.max_queue` (default 16). A coda piena solleva `CapacityError`: HTTP 503,
+`code: llm_busy`, `details.retry_after` (stima dalla durata media delle
+chiamate, tra 2 e 60 s) e header `Retry-After`. `health()` non passa dal
+cancello. L'attesa avviene dentro la misura `processing_seconds`, quindi non
+è addebitata al giocatore. Un turno rifiutato con `llm_busy` viene annullato:
+non costa un turno e non lascia messaggi.
+
+### SessionSweeper
+
+`SessionSweeper` è un task asyncio avviato nel lifespan dell'app. Ogni 60 s, in
+entrambe le modalità:
+
+1. porta a `expired` le sessioni attive scadute, cancellando cronologia e audio
+   (sotto il lock della sessione);
+2. rimuove i WAV orfani più vecchi di 30 minuti;
+3. elimina da `_session_locks` le voci di sessioni non attive con lock libero;
+4. elimina i contatori inattivi del rate limiter;
+5. in modalità online, elimina i giocatori oltre `player_ttl_hours`.
+
+Non tocca le sessioni Score vinte. Gli errori di un passaggio sono registrati e
+il ciclo prosegue.
 
 ### STT
 
@@ -182,10 +229,21 @@ Il prefisso predefinito è /api.
 | POST | /api/sessions/{id}/submit | Verifica flag |
 | POST | /api/sessions/{id}/hint | Restituisce il prossimo hint |
 | POST | /api/sessions/{id}/reset | Crea una sessione sostitutiva |
+| GET | /api/sessions/{id}/messages | Cronologia della sessione (flag mostrata come `[REDACTED_SESSION_FLAG]`) |
 | GET | /api/leaderboard | Risultati, opzionalmente filtrati per level_id |
+| POST | /api/join | Online: codice evento, crea il giocatore, restituisce il codice di recupero e imposta il cookie |
+| POST | /api/recover | Online: codice di recupero, reimposta il cookie dello stesso giocatore |
+| GET | /api/players/me | Online: nickname, scadenza e sessioni attive del giocatore |
+| POST | /api/logout | Online: cancella il cookie del dispositivo |
 | GET | /api/audio/{audio_id} | WAV TTS effimero |
 | GET | /api/docs | OpenAPI interattiva |
 | GET | / | Kiosk |
+
+Gli endpoint `join`, `recover`, `players/me` e `logout` rispondono 404 con la
+modalità online disattivata; in modalità online gli endpoint di sessione e
+`/api/audio/{audio_id}` richiedono il cookie giocatore e il proprietario della
+risorsa (vedere [SECURITY.md](SECURITY.md#modalità-online-internet)).
+`GET /api/sessions/{id}/messages` è disponibile in entrambe le modalità.
 
 Gli asset sono montati sotto /static. L'API usa modelli Pydantic con campi extra
 vietati.
@@ -294,21 +352,29 @@ ma non sostituisce un backend o un LLM reale.
 
 ## Controlli di rete e host
 
-- La CLI limita host a 127.0.0.1 o localhost.
+- La CLI limita host a 127.0.0.1, localhost o 0.0.0.0 (quest'ultimo solo in
+  container o dietro proxy).
 - Start-Janus forza 127.0.0.1.
 - TrustedHostMiddleware accetta soltanto host configurati.
 - CORS accetta origini localhost configurate e nessuna credenziale.
 - I provider LLM locali accettano soltanto URL loopback; huggingface solo il
   router https://router.huggingface.co.
 
-Non sono implementati autenticazione utente, pannello admin o accesso remoto:
-l'isolamento dipende dal bind locale, dal kiosk e dal presidio fisico.
+In locale non sono implementati autenticazione utente, pannello admin o accesso
+remoto: l'isolamento dipende dal bind locale, dal kiosk e dal presidio fisico.
+In modalità online `public_host` si aggiunge a `allowed_hosts`, CORS accetta
+solo `https://<public_host>` e l'isolamento è garantito da cookie giocatore,
+proprietà delle risorse e limiti (vedere SECURITY.md).
 
 ## Limiti noti
 
 - Nessuno streaming token.
-- Le richieste della stessa sessione sono serializzate; non esiste uno scheduler
-  globale fra sessioni concorrenti.
+- Le richieste della stessa sessione sono serializzate (in modalità online un
+  secondo turno riceve subito 409 `turn_in_progress`). Fra sessioni concorrenti
+  il `GatedLLMProvider` impone un tetto globale di chiamate simultanee con coda
+  FIFO limitata; oltre la coda risponde 503 `llm_busy`.
+- Una sola istanza: lock di sessione, rate limiter e cancello LLM sono in
+  memoria e SQLite è locale, quindi non sono ammesse repliche.
 - Il timer browser sottrae il processing riportato dal server, ma non usa un
   countdown server push.
 - Swagger è disabilitato; lo schema OpenAPI resta disponibile localmente.

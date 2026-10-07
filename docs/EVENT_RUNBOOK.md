@@ -305,6 +305,57 @@ Mostrare prima del gioco:
 
 Non raccogliere email o nome reale.
 
+## Evento online
+
+Per un evento su Internet con più giocatori (modalità online, stack
+`docker-compose.public.yml`). Deployment in
+[DOCKER.md](DOCKER.md#modalità-online-su-internet), modello di sicurezza in
+[SECURITY.md](SECURITY.md#modalità-online-internet).
+
+### Checklist
+
+- [ ] Dominio scelto e record DNS (A/AAAA) verso l'host, propagato.
+- [ ] Porte 80 e 443 aperte da Internet (necessarie al certificato automatico
+  con `JANUS_TLS=acme`).
+- [ ] `JANUS_PUBLIC_HOST` e `JANUS_ACCESS_CODES` impostati in `.env`; codici
+  generati con
+  `python -c "import secrets; print(secrets.token_urlsafe(9))"`.
+- [ ] Backend scelto: Hugging Face o GPU consigliati; Ollama su CPU solo fino a
+  2–3 giocatori.
+- [ ] Limiti rivisti in `configs/app.yaml` (`online.limits`, `llm.max_concurrent`,
+  `llm.max_queue`, `player_ttl_hours` almeno pari alla durata dell'evento).
+- [ ] Prova di carico con `scripts/online_load_test.py` e il numero di
+  giocatori atteso (`--players N`): nessuna contaminazione, latenze e 503/429
+  accettabili.
+- [ ] `docker compose ps` mostra `janus` e `caddy` in esecuzione e `janus`
+  `healthy`; `docker compose logs janus caddy` senza errori né avvisi su proxy
+  non fidati.
+- [ ] Chiave `JANUS_SECRET_KEY` o `janus.key` stabile: non ruotarla a evento in
+  corso (invalida cookie e flag).
+- [ ] Backup della classifica (`docker compose cp janus:/data/janus.sqlite3 .`).
+
+### Rotazione del codice evento
+
+Se il codice è diffuso fuori dal pubblico previsto: aggiornare
+`JANUS_ACCESS_CODES` in `.env` (anche più codici separati da virgola) e lanciare
+`docker compose up -d`. I giocatori già dentro non vengono espulsi: il cookie
+resta valido fino a `player_ttl_hours`. Il codice è solo per nuovi ingressi; il
+danno è limitato dal cancello LLM e dai limiti per giocatore.
+
+### Cosa dire ai giocatori
+
+- Alla prima entrata compare un **codice di recupero** (`RCV-XXXX-XXXX-XXXX-XXXX`):
+  va copiato e conservato, perché è mostrato una sola volta.
+- Chiudendo il browser sullo stesso dispositivo si riprende la partita; da un
+  altro dispositivo serve il codice di recupero. Il codice non prolunga la
+  scadenza e, se perso, si rientra con il codice evento come nuovo giocatore.
+- Alla ripresa la cronologia mostra la flag come `[REDACTED_SESSION_FLAG]`
+  (non è mai conservata) e il timer continua a scorrere anche se si è assenti.
+- Se compare un messaggio di attesa (503 o 429), basta riprovare dopo il
+  conto alla rovescia: un turno rifiutato per LLM occupato non costa un turno.
+- I messaggi sono elaborati dall'LLM configurato (e da Hugging Face, un servizio
+  esterno, se attivo).
+
 ## Chiusura
 
 1. Non accettare nuove sessioni.
