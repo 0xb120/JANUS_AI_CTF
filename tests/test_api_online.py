@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta
 
 import pytest
+from fakes import FileTTS
 from fastapi.testclient import TestClient
 
 from janus.api import create_app
@@ -12,6 +14,7 @@ from janus.errors import ConfigurationError
 from janus.providers.llm import MockLLMProvider
 from janus.providers.stt import DisabledSTTProvider
 from janus.providers.tts import DisabledTTSProvider
+from janus.repository import SQLiteRepository
 from janus.security import hash_recovery_code
 
 ACCESS_CODE = "event-code-2026"
@@ -232,3 +235,125 @@ def test_warns_when_online_has_no_trusted_proxies(make_app, caplog):
         make_app()
 
     assert any("trusted-proxies" in record.getMessage() for record in caplog.records)
+
+
+def _player(app, nickname):
+    client = https_client(app)
+    join(client)
+    session = client.post("/api/sessions", json={"level_id": "level_1", "nickname": nickname})
+    assert session.status_code == 201, session.text
+    return client, session.json()
+
+
+def test_every_session_endpoint_hides_foreign_sessions(make_app, tmp_path):
+    app = make_app(tts=FileTTS(tmp_path))
+    alice, session = _player(app, "Alice")
+    bob, _ = _player(app, "Bob")
+    sid = session["id"]
+    turn = alice.post(f"/api/sessions/{sid}/messages", json={"text": "ciao", "speak": True}).json()
+    audio_path = turn["audio_url"]
+    missing = bob.get(f"/api/sessions/{uuid.uuid4()}").json()
+
+    attempts = [
+        bob.get(f"/api/sessions/{sid}"),
+        bob.get(f"/api/sessions/{sid}/messages"),
+        bob.post(f"/api/sessions/{sid}/messages", json={"text": "hijack"}),
+        bob.post(
+            f"/api/sessions/{sid}/voice", content=b"RIFF....", headers={"content-type": "audio/wav"}
+        ),
+        bob.post(f"/api/sessions/{sid}/submit", json={"flag": "RH26{x}"}),
+        bob.post(f"/api/sessions/{sid}/hint", json={}),
+        bob.post(f"/api/sessions/{sid}/reset"),
+        bob.delete(f"/api/sessions/{sid}"),
+    ]
+    for response in attempts:
+        assert response.status_code == 404, response.request.url
+        assert response.json() == missing
+    assert bob.get(audio_path).status_code == 404
+
+    mine = alice.get(f"/api/sessions/{sid}").json()
+    assert mine["status"] == "active" and mine["turn_count"] == 1
+    assert "owner_id" not in mine
+    assert alice.get(audio_path).status_code == 200
+    history = alice.get(f"/api/sessions/{sid}/messages").json()
+    assert [item["role"] for item in history["messages"]] == ["user", "assistant"]
+
+
+def test_nickname_taken_by_another_player(make_app):
+    app = make_app()
+    _player(app, "Ada")
+    other = https_client(app)
+    join(other)
+
+    response = other.post("/api/sessions", json={"level_id": "level_1", "nickname": "ADA"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "nickname_taken"
+
+
+def test_turn_and_session_rate_limits(make_app):
+    app = make_app(limits=OnlineLimits(turns_per_minute=2, sessions_per_hour=2))
+    client, session = _player(app, "Ada")
+    sid = session["id"]
+
+    for _ in range(2):
+        assert client.post(f"/api/sessions/{sid}/messages", json={"text": "x"}).status_code == 200
+    limited = client.post(f"/api/sessions/{sid}/messages", json={"text": "x"})
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "rate_limited"
+
+    first = client.post("/api/sessions", json={"level_id": "level_1", "nickname": "Ada"})
+    assert first.status_code == 201
+    second = client.post("/api/sessions", json={"level_id": "level_1", "nickname": "Ada"})
+    assert second.status_code == 429
+
+
+def test_one_active_session_per_player(make_app):
+    app = make_app()
+    client, first = _player(app, "Ada")
+
+    second = client.post("/api/sessions", json={"level_id": "level_2", "nickname": "Ada"}).json()
+
+    assert client.get(f"/api/sessions/{first['id']}").json()["status"] == "reset"
+    assert [item["id"] for item in client.get("/api/players/me").json()["active_sessions"]] == [
+        second["id"]
+    ]
+
+
+def test_restart_drops_active_sessions_but_keeps_the_player(make_app, tmp_path):
+    database = tmp_path / "restart.sqlite3"
+    first_repo = SQLiteRepository(database)
+    client, session = _player(make_app(repo=first_repo), "Ada")
+    first_repo.close()
+
+    restarted = make_app(repo=SQLiteRepository(database))
+    survivor = https_client(restarted)
+    survivor.cookies = client.cookies
+
+    assert survivor.get("/api/players/me").json()["active_sessions"] == []
+    assert survivor.get(f"/api/sessions/{session['id']}").status_code == 404
+
+
+def test_recover_restores_the_same_player_from_a_new_device(make_app):
+    app = make_app()
+    first = https_client(app)
+    recovery = join(first)
+    session = first.post("/api/sessions", json={"level_id": "level_1", "nickname": "Ada"}).json()
+
+    second = https_client(app)
+    typed = recovery.lower().replace("-", " ").removeprefix("rcv ")
+    assert second.post("/api/recover", json={"recovery_code": typed}).status_code == 200
+    me = second.get("/api/players/me").json()
+
+    assert me["nickname"] == "Ada"
+    assert [item["id"] for item in me["active_sessions"]] == [session["id"]]
+    assert second.get(f"/api/sessions/{session['id']}").status_code == 200
+
+
+def test_players_me_and_sessions_require_the_cookie(make_app):
+    client = https_client(make_app())
+    forged = {"Cookie": "janus_player=v1.forged.123.sig"}
+
+    assert client.get("/api/players/me").status_code == 401
+    assert client.post("/api/sessions", json={"nickname": "Ada"}).status_code == 401
+    assert client.get("/api/players/me", headers=forged).status_code == 401

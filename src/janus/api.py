@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -436,39 +436,79 @@ def create_app(
         result.delete_cookie(PLAYER_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
         return result
 
+    def _limit_turn(owner: str | None) -> None:
+        if owner is not None:
+            rate_limiter.hit(f"turn:{owner}", limit=limits.turns_per_minute, window_seconds=60)
+
+    def _limit_session(owner: str | None) -> None:
+        if owner is not None:
+            rate_limiter.hit(
+                f"session:{owner}", limit=limits.sessions_per_hour, window_seconds=3600
+            )
+
     @app.post(f"{prefix}/sessions", response_model=SessionRecord, status_code=201)
-    async def create_session(payload: CreateSessionRequest) -> SessionRecord:
+    async def create_session(
+        payload: CreateSessionRequest, owner: str | None = Depends(current_player)
+    ) -> SessionRecord:
         requested_mode = payload.mode_id or config.app.default_mode
         if requested_mode != config.app.default_mode:
             raise ValidationError(
                 "Game mode is fixed by the operator at startup",
                 details={"active_mode": config.app.default_mode},
             )
-        return engine.create_session(
+        _limit_session(owner)
+        return await engine.open_session(
             mode_id=config.app.default_mode,
             level_id=payload.level_id,
             nickname=payload.nickname,
+            owner_id=owner,
         )
 
     @app.get(f"{prefix}/sessions/{{session_id}}", response_model=SessionRecord)
-    async def get_session(session_id: str) -> SessionRecord:
-        return await engine.get_session_serialized(session_id)
+    async def get_session(
+        session_id: str, owner: str | None = Depends(current_player)
+    ) -> SessionRecord:
+        return await engine.get_session_serialized(session_id, owner_id=owner)
 
     @app.delete(f"{prefix}/sessions/{{session_id}}", status_code=204)
-    async def delete_session(session_id: str) -> Response:
-        await engine.delete_serialized(session_id)
+    async def delete_session(
+        session_id: str, owner: str | None = Depends(current_player)
+    ) -> Response:
+        await engine.delete_serialized(session_id, owner_id=owner)
         return Response(status_code=204)
 
     @app.post(f"{prefix}/sessions/{{session_id}}/messages")
-    async def send_message(session_id: str, payload: MessageRequest) -> dict[str, Any]:
+    async def send_message(
+        session_id: str, payload: MessageRequest, owner: str | None = Depends(current_player)
+    ) -> dict[str, Any]:
+        _limit_turn(owner)
         return (
             await engine.message(
                 session_id,
                 payload.text,
                 language=payload.language,
                 speak=payload.speak,
+                owner_id=owner,
             )
         ).model_dump(mode="json")
+
+    @app.get(f"{prefix}/sessions/{{session_id}}/messages")
+    async def session_history(
+        session_id: str, owner: str | None = Depends(current_player)
+    ) -> dict[str, Any]:
+        return {
+            "session_id": session_id,
+            "messages": [
+                {
+                    "role": item.role,
+                    "content": item.content,
+                    "language": item.language.value,
+                    "modality": item.modality.value,
+                    "created_at": item.created_at.isoformat(),
+                }
+                for item in engine.history(session_id, owner_id=owner)
+            ],
+        }
 
     @app.post(f"{prefix}/sessions/{{session_id}}/voice")
     async def send_voice(
@@ -476,7 +516,9 @@ def create_app(
         request: Request,
         language: Annotated[LanguagePreference, Query()] = LanguagePreference.AUTO,
         speak: Annotated[bool, Query()] = True,
+        owner: str | None = Depends(current_player),
     ) -> dict[str, Any]:
+        _limit_turn(owner)
         max_bytes = config.app.speech.max_audio_bytes
         try:
             declared_length = int(request.headers.get("content-length", "0") or "0")
@@ -534,7 +576,7 @@ def create_app(
                 handle.write(raw)
                 temporary_path = Path(handle.name)
             result = await engine.voice(
-                session_id, temporary_path, language=language, speak=speak
+                session_id, temporary_path, language=language, speak=speak, owner_id=owner
             )
             return result.model_dump(mode="json")
         finally:
@@ -545,23 +587,30 @@ def create_app(
                     pass
 
     @app.post(f"{prefix}/sessions/{{session_id}}/submit")
-    async def submit_flag(session_id: str, payload: SubmitRequest) -> dict[str, Any]:
-        return (await engine.submit_serialized(session_id, payload.flag)).model_dump(mode="json")
+    async def submit_flag(
+        session_id: str, payload: SubmitRequest, owner: str | None = Depends(current_player)
+    ) -> dict[str, Any]:
+        result = await engine.submit_serialized(session_id, payload.flag, owner_id=owner)
+        return result.model_dump(mode="json")
 
     @app.post(f"{prefix}/sessions/{{session_id}}/hint")
     async def request_hint(
         session_id: str,
         payload: HintRequest | None = None,
         language: Annotated[LanguagePreference, Query()] = LanguagePreference.AUTO,
+        owner: str | None = Depends(current_player),
     ) -> dict[str, Any]:
         selected_language = payload.language if payload is not None else language
-        return (await engine.hint_serialized(session_id, selected_language)).model_dump(
-            mode="json"
-        )
+        return (
+            await engine.hint_serialized(session_id, selected_language, owner_id=owner)
+        ).model_dump(mode="json")
 
     @app.post(f"{prefix}/sessions/{{session_id}}/reset", response_model=SessionRecord)
-    async def reset_session(session_id: str) -> SessionRecord:
-        return await engine.reset_serialized(session_id)
+    async def reset_session(
+        session_id: str, owner: str | None = Depends(current_player)
+    ) -> SessionRecord:
+        _limit_session(owner)
+        return await engine.reset_serialized(session_id, owner_id=owner)
 
     @app.get(f"{prefix}/leaderboard")
     async def leaderboard(
@@ -579,8 +628,8 @@ def create_app(
         }
 
     @app.get(f"{prefix}/audio/{{audio_id}}")
-    async def audio(audio_id: str) -> FileResponse:
-        path = engine.tts.resolve(audio_id)
+    async def audio(audio_id: str, owner: str | None = Depends(current_player)) -> FileResponse:
+        path = engine.audio_path(audio_id, owner_id=owner)
         if path is None:
             raise NotFoundError("Audio artifact not found")
         return FileResponse(path, media_type="audio/wav", filename=f"janus-{audio_id}.wav")
