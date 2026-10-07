@@ -142,7 +142,13 @@ class PlayerTokenService:
         if len(parts) != 4 or parts[0] != "v1":
             return None
         _, player_id, expires_raw, signature = parts
-        if not _UUID.fullmatch(player_id) or not expires_raw.isdigit():
+        if not _UUID.fullmatch(player_id):
+            return None
+        # Strictly validate expires_raw: 1-12 digits, no leading zero, no Unicode digits
+        if not re.fullmatch(r"[1-9][0-9]{0,11}", expires_raw):
+            return None
+        # Strictly validate signature: exactly 43 unpadded urlsafe base64 characters
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", signature):
             return None
         expires_at = int(expires_raw)
         if not hmac.compare_digest(self._sign(player_id, expires_at), signature):
@@ -186,7 +192,10 @@ def generate_recovery_code() -> str:
 
 def normalize_recovery_code(raw: str) -> str | None:
     cleaned = re.sub(r"[\s-]", "", raw).upper()
-    cleaned = cleaned.removeprefix("RCV")
+    # Strip leading "RCV" only when the cleaned string has 19 characters
+    # (3 for "RCV" prefix + 16 for body), avoiding stripping RCV from body itself
+    if len(cleaned) == 19:
+        cleaned = cleaned.removeprefix("RCV")
     if len(cleaned) != 16 or any(character not in RECOVERY_ALPHABET for character in cleaned):
         return None
     return cleaned

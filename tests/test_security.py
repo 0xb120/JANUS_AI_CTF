@@ -77,6 +77,27 @@ def test_player_token_rejects_tampering(mutate):
     assert _tokens().verify(mutate(token)) is None
 
 
+@pytest.mark.parametrize(
+    "bad_expiry_or_sig",
+    [
+        # Non-ASCII digit expiry (superscript two)
+        lambda t: t.replace(".1000100.", ".²."),
+        # Very long expiry that would overflow int()
+        lambda t: t.replace(".1000100.", "." + "9" * 4400 + "."),
+        # Non-ASCII signature
+        lambda t: t.rsplit(".", 1)[0] + ".é",
+        # Arabic-Indic digits in expiry
+        lambda t: t.replace(".1000100.", ".١٠٠٠١٠٠."),
+        # Leading zero in expiry
+        lambda t: t.replace(".1000100.", ".01000100."),
+    ],
+)
+def test_player_token_rejects_invalid_expiry_and_signature_formats(bad_expiry_or_sig):
+    """Ensure verify never raises on attacker-supplied tokens; only returns None."""
+    token = _tokens().issue(str(uuid.uuid4()), 1_000_100)
+    assert _tokens().verify(bad_expiry_or_sig(token)) is None
+
+
 def test_player_token_key_is_domain_separated_from_flags():
     service = FlagService(b"k" * 32)
     other = PlayerTokenService(FlagService(b"x" * 32).derive_subkey(PLAYER_TOKEN_LABEL))
@@ -124,3 +145,19 @@ def test_recovery_code_normalization_accepts_human_input():
     assert normalize_recovery_code("RCV-1234") is None
     assert hash_recovery_code(expected) == hash_recovery_code(normalize_recovery_code(code.lower()))
     assert len(hash_recovery_code(expected)) == 64
+
+
+def test_recovery_code_body_starting_with_rcv():
+    """Verify that a body starting with RCV is handled correctly (not double-stripped)."""
+    # Body starting with R, C, V (16 chars total from the alphabet)
+    body = "RCV0123456789ABC"  # 16 characters (R, C, V, 0-9, A, B, C)
+    # With prefix: "RCV-RCV0-1234-5678-9ABC" (prefix added + body formatted with dashes)
+    with_prefix = "RCV-RCV0-1234-5678-9ABC"
+    # Without prefix (just body with dashes): "RCV0-1234-5678-9ABC"
+    without_prefix = "RCV0-1234-5678-9ABC"
+
+    # Both should normalize to the same body
+    assert normalize_recovery_code(with_prefix) == body
+    assert normalize_recovery_code(without_prefix) == body
+    assert normalize_recovery_code(with_prefix.lower()) == body
+    assert normalize_recovery_code(with_prefix.replace("-", " ")) == body
