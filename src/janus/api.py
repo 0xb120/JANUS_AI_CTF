@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import tempfile
 import time
 import uuid
@@ -73,6 +74,7 @@ class HintRequest(APIModel):
 
 
 PLAYER_COOKIE = "janus_player"
+_FORWARDING_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-proto")
 
 
 class JoinRequest(APIModel):
@@ -174,6 +176,11 @@ def create_app(
     )
     online = config.app.online
     limits = online.limits
+    if online.enabled and not online.trusted_proxies:
+        logging.getLogger("janus.api").warning(
+            "Online mode without --trusted-proxies: client IPs and the HTTPS scheme come from "
+            "the direct peer only. Behind a reverse proxy, list it in --trusted-proxies."
+        )
     access_codes = AccessCodeVerifier.from_env(online.access_codes_env) if online.enabled else None
     player_tokens = PlayerTokenService(flag_service.derive_subkey(PLAYER_TOKEN_LABEL))
     rate_limiter = RateLimiter()
@@ -220,7 +227,9 @@ def create_app(
 
     @app.middleware("http")
     async def kiosk_security_headers(request: Request, call_next):
-        response = await call_next(request)
+        return _apply_security_headers(request, await call_next(request))
+
+    def _apply_security_headers(request: Request, response: Response) -> Response:
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
@@ -242,7 +251,11 @@ def create_app(
     def _client_ip(request: Request) -> str:
         return request.client.host if request.client else "unknown"
 
-    def _is_loopback(request: Request) -> bool:
+    def _is_direct_local(request: Request) -> bool:
+        # A loopback peer carrying forwarding headers is a same-host proxy relaying
+        # an outside client: it must not inherit the local exemptions.
+        if any(name in request.headers for name in _FORWARDING_HEADERS):
+            return False
         try:
             return ipaddress.ip_address(_client_ip(request)).is_loopback
         except ValueError:
@@ -282,15 +295,16 @@ def create_app(
         @app.middleware("http")
         async def require_https(request: Request, call_next):
             # Loopback stays reachable over HTTP for the container healthcheck.
-            if request.url.scheme != "https" and not _is_loopback(request):
+            if request.url.scheme != "https" and not _is_direct_local(request):
                 message = "HTTPS is required"
-                return JSONResponse(
+                refusal = JSONResponse(
                     status_code=400,
                     content={
                         "detail": message,
                         "error": {"code": "https_required", "message": message, "details": {}},
                     },
                 )
+                return _apply_security_headers(request, refusal)
             response = await call_next(request)
             if request.url.scheme == "https":
                 response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -355,7 +369,7 @@ def create_app(
             )
         )
         status = "ok" if configured_components_ready and not fallback_active else "degraded"
-        if online.enabled and not _is_loopback(request) and _player_token(request) is None:
+        if online.enabled and not _is_direct_local(request) and _player_token(request) is None:
             return {"status": status, "version": config.app.version}
         return {
             "status": status,
@@ -374,6 +388,7 @@ def create_app(
         auth_key = f"auth:{_client_ip(request)}"
         # Only failures count: many players behind one NAT must be able to join together.
         rate_limiter.check(auth_key, limit=limits.auth_attempts_per_minute, window_seconds=60)
+        assert access_codes is not None  # guaranteed by _require_online()
         if not access_codes.verify(payload.code):
             rate_limiter.record(auth_key, window_seconds=60)
             raise UnauthorizedError("Invalid access code")

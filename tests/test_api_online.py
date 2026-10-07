@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,6 +81,7 @@ def test_wrong_codes_are_rate_limited_per_ip(make_app):
     blocked = client.post("/api/join", json={"code": ACCESS_CODE})
 
     assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "rate_limited"
     assert int(blocked.headers["retry-after"]) >= 1
 
 
@@ -156,3 +157,78 @@ def test_online_endpoints_do_not_exist_in_local_mode(loaded_config, repository, 
     assert client.post("/api/join", json={"code": ACCESS_CODE}).status_code == 404
     assert client.get("/api/config").json()["app"]["online"] is False
     assert "components" in client.get("/api/health").json()
+
+
+def loopback_client(app, scheme: str = "http") -> TestClient:
+    return TestClient(app, base_url=f"{scheme}://testserver", client=("127.0.0.1", 50000))
+
+
+def test_recover_from_a_new_client_keeps_the_original_expiry(make_app):
+    app = make_app()
+    first = https_client(app)
+    response = first.post("/api/join", json={"code": ACCESS_CODE})
+    code = response.json()["recovery_code"]
+    original_expiry = response.json()["expires_at"]
+
+    second = https_client(app)
+    recovered = second.post("/api/recover", json={"recovery_code": code})
+
+    assert recovered.status_code == 200
+    assert recovered.json()["expires_at"] == original_expiry
+    me = second.get("/api/players/me")
+    assert me.status_code == 200
+    assert me.json()["nickname"] is None
+    # The cookie carries whole seconds, so /players/me truncates the microseconds.
+    expected = datetime.fromisoformat(original_expiry).replace(microsecond=0)
+    assert datetime.fromisoformat(me.json()["expires_at"]) == expected
+
+
+def test_join_and_recover_failures_share_one_bucket(make_app):
+    app = make_app(limits=OnlineLimits(auth_attempts_per_minute=3))
+    code = join(https_client(app))
+    client = https_client(app)
+    for _ in range(2):
+        assert client.post("/api/join", json={"code": "wrong-code"}).status_code == 401
+    bad = client.post("/api/recover", json={"recovery_code": "RCV-0000-0000-0000-0000"})
+    assert bad.status_code == 401
+
+    blocked = client.post("/api/recover", json={"recovery_code": code})
+
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "rate_limited"
+
+
+def test_direct_loopback_without_forwarding_headers_may_use_plain_http(make_app):
+    client = loopback_client(make_app())
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert "components" in response.json()
+
+
+def test_forwarded_loopback_requests_are_not_exempt(make_app):
+    app = make_app()
+    forwarded = {"X-Forwarded-For": "203.0.113.9"}
+
+    refused = loopback_client(app).get("/api/config", headers=forwarded)
+    reduced = loopback_client(app, "https").get("/api/health", headers=forwarded)
+
+    assert refused.status_code == 400
+    assert refused.json()["error"]["code"] == "https_required"
+    assert set(reduced.json()) == {"status", "version"}
+
+
+def test_https_required_response_carries_security_headers(make_app):
+    refused = TestClient(make_app()).get("/api/config")
+
+    assert refused.status_code == 400
+    assert refused.headers["x-frame-options"] == "DENY"
+    assert refused.headers["cache-control"] == "no-store"
+
+
+def test_warns_when_online_has_no_trusted_proxies(make_app, caplog):
+    with caplog.at_level("WARNING", logger="janus.api"):
+        make_app()
+
+    assert any("trusted-proxies" in record.getMessage() for record in caplog.records)
