@@ -43,7 +43,9 @@ flowchart LR
 - Il modello non riceve la chiave HMAC.
 - Output LLM e input utente sono dati non fidati.
 - Il tool BIFRONS non è un confine di sicurezza reale.
-- Bind loopback e presidio fisico sono parte del deployment.
+- In modalità locale (default) bind loopback e presidio fisico sono parte del
+  deployment; in modalità online le sostituiscono cookie, proprietà delle
+  risorse e limiti (vedere [Modalità online](#modalità-online-internet)).
 
 ## Controlli implementati
 
@@ -176,7 +178,9 @@ Con la modalità disattivata il comportamento resta quello del kiosk locale.
 - **Codici evento:** letti solo dall'ambiente (`JANUS_ACCESS_CODES`, separati
   da virgola, almeno 8 caratteri ciascuno), mai da YAML o repository. Il
   confronto è a tempo costante contro ogni codice configurato. Si ruotano
-  aggiornando `.env` e lanciando `docker compose up -d`.
+  aggiornando `.env` e rieseguendo `docker compose up -d` con lo stesso elenco di
+  file `-f` del deployment (altrimenti `janus` viene ricreato senza modalità
+  online; vedere [DOCKER.md](DOCKER.md#modalità-online-su-internet)).
 - **Cookie `janus_player`:** `v1.<player_id>.<scadenza>.<firma>`, con firma
   HMAC-SHA256 derivata dalla chiave master con separazione di dominio rispetto
   alle flag. Attributi: `HttpOnly; Secure; SameSite=Strict; Path=/`. La verifica
@@ -269,9 +273,10 @@ modelli, percorsi).
 - Caddy non scrive log di accesso finché nel `docker/Caddyfile` non si aggiunge
   una direttiva `log`: non aggiungerla, oppure limitarne i campi, se non serve.
 - I dati dei giocatori (riga `players` con hash del recupero) vivono
-  `player_ttl_hours`; gli IP dei client restano solo in memoria per la finestra
-  del limite. Informare i giocatori che i messaggi sono elaborati dall'LLM
-  configurato e, con Hugging Face, da un servizio esterno.
+  `player_ttl_hours`.
+- Gli IP dei client restano solo in memoria, per la finestra del limite.
+- Informare i giocatori che i messaggi sono elaborati dall'LLM configurato e,
+  con Hugging Face, da un servizio esterno.
 
 ### Chiave master
 
@@ -328,8 +333,10 @@ all'operatore.
 
 /api/docs espone OpenAPI sulla macchina. Non esiste autenticazione per gli
 endpoint pubblici. Questo è accettabile soltanto nel deployment locale
-presidiato. Non pubblicare la porta 8000, non usare 0.0.0.0 e non configurare
-port forwarding.
+presidiato. In modalità locale (default) non pubblicare la porta 8000, non usare
+0.0.0.0 e non configurare port forwarding. In modalità online l'accesso è
+protetto come descritto in [Modalità online](#modalità-online-internet), con
+`/api/docs` incluso.
 
 Il database non va aperto o copiato mentre JANUS è in esecuzione. Effettuare
 backup dopo aver chiuso il launcher.

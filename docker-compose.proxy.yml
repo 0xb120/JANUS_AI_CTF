@@ -1,0 +1,15 @@
+# Internet-facing multiplayer mode behind an EXTERNAL reverse proxy or CDN that
+# terminates TLS (no Caddy in the stack):
+#   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d --build
+#   (add -f docker-compose.hf.yml for Hugging Face, -f docker-compose.gpu.yml for a GPU)
+#
+# Required in .env: JANUS_PUBLIC_HOST, JANUS_ACCESS_CODES, JANUS_TRUSTED_PROXIES
+# (IP/CIDR of the proxy; X-Forwarded-* is trusted only from there). Publish JANUS on an
+# address the proxy can reach with JANUS_BIND_ADDRESS/JANUS_PORT; see docs/DOCKER.md.
+services:
+  janus:
+    environment:
+      JANUS_ONLINE: "1"
+      JANUS_PUBLIC_HOST: ${JANUS_PUBLIC_HOST:?set JANUS_PUBLIC_HOST in .env}
+      JANUS_TRUSTED_PROXIES: ${JANUS_TRUSTED_PROXIES:?set JANUS_TRUSTED_PROXIES (your proxy IP/CIDR) in .env}
+      JANUS_ACCESS_CODES: ${JANUS_ACCESS_CODES:?set JANUS_ACCESS_CODES in .env}

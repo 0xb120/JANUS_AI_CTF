@@ -327,6 +327,8 @@ Per un evento su Internet con più giocatori (modalità online, stack
 - [ ] Prova di carico con `scripts/online_load_test.py` e il numero di
   giocatori atteso (`--players N`): nessuna contaminazione, latenze e 503/429
   accettabili.
+- [ ] I comandi `docker compose` usano l'elenco `-f` del deployment (o
+  `COMPOSE_FILE` in `.env`, vedere DOCKER.md).
 - [ ] `docker compose ps` mostra `janus` e `caddy` in esecuzione e `janus`
   `healthy`; `docker compose logs janus caddy` senza errori né avvisi su proxy
   non fidati.
@@ -337,8 +339,13 @@ Per un evento su Internet con più giocatori (modalità online, stack
 ### Rotazione del codice evento
 
 Se il codice è diffuso fuori dal pubblico previsto: aggiornare
-`JANUS_ACCESS_CODES` in `.env` (anche più codici separati da virgola) e lanciare
-`docker compose up -d`. I giocatori già dentro non vengono espulsi: il cookie
+`JANUS_ACCESS_CODES` in `.env` (anche più codici separati da virgola) e rieseguire
+`up -d` con lo stesso elenco di file del deployment, per esempio
+`docker compose -f docker-compose.yml -f docker-compose.public.yml up -d`
+(aggiungere `-f docker-compose.hf.yml` o `-f docker-compose.gpu.yml` se usati;
+`docker-compose.proxy.yml` al posto di `public` con proxy esterno). Senza
+l'override `janus` viene ricreato senza modalità online. In alternativa
+impostare `COMPOSE_FILE` in `.env` (vedere DOCKER.md). I giocatori già dentro non vengono espulsi: il cookie
 resta valido fino a `player_ttl_hours`. Il codice è solo per nuovi ingressi; il
 danno è limitato dal cancello LLM e dai limiti per giocatore.
 

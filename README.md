@@ -510,10 +510,13 @@ traversal degli artefatti audio.
 
 JANUS è progettato come laboratorio locale e consensuale:
 
-- API e provider LLM locali accettano soltanto endpoint loopback; l'unica
+- in modalità locale (default) API e provider LLM accettano soltanto endpoint
+  loopback; l'unica
   eccezione, da scegliere esplicitamente, è il provider `huggingface`, limitato
   a `https://router.huggingface.co`;
-- Trusted Host e CORS sono limitati alla macchina locale;
+- in modalità locale Trusted Host e CORS sono limitati alla macchina; la
+  modalità online (accesso con codice, HTTPS, limiti) è in
+  [docs/SECURITY.md](docs/SECURITY.md#modalità-online-internet);
 - ogni sessione usa una flag HMAC distinta e confronti constant-time;
 - il tool `diagnostics.collect` è un simulatore in memoria senza accesso a rete,
   shell o filesystem;

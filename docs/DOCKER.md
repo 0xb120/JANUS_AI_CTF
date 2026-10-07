@@ -120,6 +120,15 @@ proxy si occupa solo del TLS. Il modello di sicurezza è in
 docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
 ```
 
+Per il resto di questa sezione i comandi `docker compose` (`ps`, `logs`, `cp`,
+`up -d`) vanno dati con lo stesso elenco di `-f` dell'avvio, altrimenti
+`janus` viene ricreato senza modalità online. Per non ripeterlo, in `.env`:
+
+```dotenv
+COMPOSE_FILE=docker-compose.yml:docker-compose.public.yml
+# con HF o GPU: docker-compose.yml:docker-compose.hf.yml:docker-compose.public.yml
+```
+
 L'override si combina con gli altri:
 
 ```bash
@@ -169,15 +178,26 @@ e il timeout di lettura a 120 s (`docker/Caddyfile`).
 ### Variante B: proxy o CDN esterno
 
 JANUS viene pubblicato su un indirizzo interno e il proxy esterno termina il TLS.
+Il file `docker-compose.proxy.yml` abilita la modalità online nel container
+(`JANUS_ONLINE=1` e le tre variabili sotto) senza Caddy; la pubblicazione della
+porta resta quella dei file base e HF (`JANUS_BIND_ADDRESS`, `JANUS_PORT`).
 In `.env`:
 
 ```dotenv
 JANUS_BIND_ADDRESS=10.0.0.5          # indirizzo interno raggiungibile dal proxy
-JANUS_ONLINE=1
 JANUS_PUBLIC_HOST=ctf.example.com
-JANUS_TRUSTED_PROXIES=10.0.0.2       # IP/CIDR del proxy
+JANUS_TRUSTED_PROXIES=10.0.0.2       # IP/CIDR del proxy (obbligatoria)
 JANUS_ACCESS_CODES=codice-uno,codice-due
 ```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d --build
+# con Hugging Face o GPU aggiungere -f docker-compose.hf.yml / -f docker-compose.gpu.yml
+```
+
+Se una delle tre variabili manca, Compose si ferma con un errore esplicito.
+Come per Caddy, si può impostare
+`COMPOSE_FILE=docker-compose.yml:docker-compose.proxy.yml` in `.env`.
 
 Requisiti per il proxy:
 
@@ -185,7 +205,7 @@ Requisiti per il proxy:
 - limite sul body di almeno 20 MB (audio vocale);
 - timeout di lettura di almeno 120 s (turni LLM lenti).
 
-`JANUS_TRUSTED_PROXIES` è obbligatoria: senza di essa JANUS ignora gli header
+Senza `JANUS_TRUSTED_PROXIES` (con i file Compose forniti è obbligatoria) JANUS ignora gli header
 inoltrati, vede ogni client come l'IP del proxy (rate limit condiviso da tutti)
 e registra un avviso all'avvio. Un proxy sullo stesso host va elencato come gli
 altri: altrimenti ogni client sembra locale ai limiti.
@@ -229,7 +249,8 @@ carico con `scripts/online_load_test.py` (vedere
 ```bash
 python scripts/online_load_test.py --base-url https://ctf.example.com --players 50
 # con JANUS_TLS=internal (es. JANUS_HTTPS_PORT=8443), fidandosi della CA locale di Caddy:
-docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+docker compose -f docker-compose.yml -f docker-compose.public.yml \
+  cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
 python scripts/online_load_test.py --base-url https://127.0.0.1:8443 \
   --host-header ctf.example.com --ca-file ./caddy-root.crt --players 50
 ```
@@ -239,7 +260,9 @@ python scripts/online_load_test.py --base-url https://127.0.0.1:8443 \
 ### Rotazione dei codici e log
 
 Per ruotare il codice evento aggiornare `JANUS_ACCESS_CODES` in `.env` e
-lanciare `docker compose up -d`. I log di accesso di JANUS e di Caddy
+rieseguire `docker compose -f docker-compose.yml -f docker-compose.public.yml up -d`
+(con gli stessi `-f` di HF/GPU usati all'avvio, oppure `docker-compose.proxy.yml`
+con proxy esterno; senza l'override `janus` torna senza modalità online). I log di accesso di JANUS e di Caddy
 contengono IP e ID di sessione nei percorsi: per ridurli si veda
 [SECURITY.md](SECURITY.md#log-di-accesso-e-privacy).
 
@@ -267,9 +290,9 @@ facoltative; `.env.example` riporta l'elenco completo.
 | `OLLAMA_KEEP_ALIVE` | `24h` | Tempo di permanenza del modello in memoria |
 | `OLLAMA_NUM_PARALLEL` | `1` | Richieste LLM servite in parallelo |
 | `JANUS_ONLINE` | `0` | `1` abilita la modalità online (impostata da `docker-compose.public.yml`) |
-| `JANUS_PUBLIC_HOST` | vuoto | Hostname pubblico (online; obbligatoria con l'override public) |
-| `JANUS_ACCESS_CODES` | vuoto | Codici evento separati da virgola (online; obbligatoria con l'override public) |
-| `JANUS_TRUSTED_PROXIES` | vuoto | IP/CIDR dei proxy di cui fidarsi per `X-Forwarded-*` |
+| `JANUS_PUBLIC_HOST` | vuoto | Hostname pubblico (online; obbligatoria con gli override public e proxy) |
+| `JANUS_ACCESS_CODES` | vuoto | Codici evento separati da virgola (online; obbligatoria con gli override public e proxy) |
+| `JANUS_TRUSTED_PROXIES` | vuoto | IP/CIDR dei proxy di cui fidarsi per `X-Forwarded-*` (obbligatoria con l'override proxy; impostata da public) |
 | `JANUS_TLS` | `acme` | `acme` oppure `internal` (override public) |
 | `JANUS_HTTP_PORT` / `JANUS_HTTPS_PORT` | `80` / `443` | Porte pubblicate da Caddy |
 | `JANUS_SUBNET` / `JANUS_CADDY_IP` | `172.30.57.0/24` / `172.30.57.10` | Subnet Compose e indirizzo fisso di Caddy |

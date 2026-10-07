@@ -34,8 +34,8 @@ un'alternativa avanzata. Il provider mock è riservato a DEMO e test.
 
 | Processo | Responsabilità | Rete |
 | --- | --- | --- |
-| Microsoft Edge | UI, MediaRecorder, riproduzione WAV, Web Speech di fallback | Client di 127.0.0.1 |
-| JANUS/FastAPI | API, sessioni, challenge, score, statici | 127.0.0.1:8000 |
+| Microsoft Edge | UI, MediaRecorder, riproduzione WAV, Web Speech di fallback | Client di 127.0.0.1 (online: browser dei giocatori via proxy TLS) |
+| JANUS/FastAPI | API, sessioni, challenge, score, statici | 127.0.0.1:8000 (online: 0.0.0.0 in container, dietro proxy) |
 | Ollama | Inferenza qwen3:4b-instruct | localhost:11434 |
 | STT/TTS | faster-whisper e Piper/SAPI | Nessun servizio pubblico |
 
@@ -108,7 +108,8 @@ vengono cancellati; l'abbandono elimina l'intera sessione. Una sessione Score
 vinta non può essere eliminata tramite l'endpoint pubblico.
 
 La leaderboard conserva il miglior risultato per coppia nickname/level,
-considerando il nickname senza differenze tra maiuscole e minuscole.
+considerando il nickname senza differenze tra maiuscole e minuscole. Ordina per
+score decrescente, completamento più antico e minor numero di turni.
 
 Per la modalità online la persistenza aggiunge:
 
@@ -122,8 +123,7 @@ Per la modalità online la persistenza aggiunge:
 | `recovery_hash` | TEXT, univoco | SHA-256 del codice di recupero normalizzato |
 | `created_at` | TEXT | Origine della scadenza (`player_ttl_hours`) |
 
-Il codice di recupero in chiaro non è mai conservato. Ordina per
-score decrescente, completamento più antico e minor numero di turni.
+Il codice di recupero in chiaro non è mai conservato.
 
 ### Provider LLM
 
