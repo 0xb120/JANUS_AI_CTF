@@ -334,6 +334,12 @@ Per un evento su Internet con più giocatori (modalità online, stack
   non fidati.
 - [ ] Chiave `JANUS_SECRET_KEY` o `janus.key` stabile: non ruotarla a evento in
   corso (invalida cookie e flag).
+- [ ] Database pulito: rimuovere i giocatori di test (prove di carico e prova
+  generale) prima dell'apertura. Con lo stack fermo (`docker compose ... down`,
+  stesso elenco `-f`) eseguire `docker volume rm janus_janus-data`, poi
+  riavviare con `up -d`. **Attenzione:** il volume contiene anche la classifica
+  e la chiave HMAC `janus.key`: vengono cancellate entrambe (fare prima il backup
+  se servono; con `JANUS_SECRET_KEY` in `.env` la chiave resta quella).
 - [ ] Backup della classifica (`docker compose cp janus:/data/janus.sqlite3 .`).
 
 ### Rotazione del codice evento
@@ -356,6 +362,9 @@ danno è limitato dal cancello LLM e dai limiti per giocatore.
 - Chiudendo il browser sullo stesso dispositivo si riprende la partita; da un
   altro dispositivo serve il codice di recupero. Il codice non prolunga la
   scadenza e, se perso, si rientra con il codice evento come nuovo giocatore.
+- Il nickname resta riservato al giocatore che lo ha usato per primo. Chi perde
+  sia il cookie sia il codice di recupero rientra come nuovo giocatore e deve
+  scegliere un nickname diverso.
 - Alla ripresa la cronologia mostra la flag come `[REDACTED_SESSION_FLAG]`
   (non è mai conservata) e il timer continua a scorrere anche se si è assenti.
 - Se compare un messaggio di attesa (503 o 429), basta riprovare dopo il
