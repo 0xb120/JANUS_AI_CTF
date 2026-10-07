@@ -707,23 +707,29 @@ class ChallengeEngine:
         except NotFoundError:
             return False
 
+    @staticmethod
+    def _lock_is_idle(lock: asyncio.Lock) -> bool:
+        # locked() is False between release() and the woken waiter resuming, so also
+        # require an empty waiter queue. Relies on CPython's asyncio.Lock._waiters.
+        return not lock.locked() and not getattr(lock, "_waiters", None)
+
     def prune_locks(self) -> int:
         removed = 0
         for session_id, lock in list(self._session_locks.items()):
-            if lock.locked():
+            if not self._lock_is_idle(lock):
                 continue
             try:
                 active = self.repository.get_session(session_id).status is SessionStatus.ACTIVE
             except NotFoundError:
                 active = False
             if not active:
-                # Safe: acquiring a lock never yields between lookup and acquire,
-                # and a free lock has no waiters.
+                # Safe: an idle lock is free with no queued waiters, and acquiring
+                # never yields between lookup and acquire.
                 del self._session_locks[session_id]
                 removed += 1
-        # Owner locks are recreated on demand and nothing awaits a free one.
+        # Owner locks are recreated on demand when idle.
         for owner_id, lock in list(self._owner_locks.items()):
-            if not lock.locked():
+            if self._lock_is_idle(lock):
                 del self._owner_locks[owner_id]
                 removed += 1
         return removed

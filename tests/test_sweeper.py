@@ -135,3 +135,67 @@ def test_prune_locks_removes_idle_owner_locks(loaded_config, repository, flag_se
 
     assert engine.prune_locks() == 1
     assert "p1" not in engine._owner_locks
+
+
+def test_prune_locks_keeps_held_owner_lock(loaded_config, repository, flag_service):
+    engine = _engine(loaded_config, repository, flag_service)
+
+    async def scenario():
+        lock = engine._owner_lock("p1")
+        async with lock:
+            assert engine.prune_locks() == 0
+            assert engine._owner_locks["p1"] is lock
+
+    asyncio.run(scenario())
+
+
+def test_prune_locks_keeps_owner_lock_with_pending_waiter(
+    loaded_config, repository, flag_service
+):
+    engine = _engine(loaded_config, repository, flag_service)
+
+    async def scenario():
+        lock = engine._owner_lock("p1")
+        await lock.acquire()
+
+        async def waiter():
+            async with engine._owner_lock("p1") as _:
+                return engine._owner_locks.get("p1")
+
+        task = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        lock.release()
+        # The waiter has not resumed yet: locked() is False but it is still queued.
+        assert not lock.locked()
+        assert engine.prune_locks() == 0
+        assert engine._owner_locks["p1"] is lock
+        assert await task is lock
+
+    asyncio.run(scenario())
+
+
+def test_prune_locks_keeps_session_lock_with_pending_waiter(
+    loaded_config, repository, flag_service
+):
+    engine = _engine(loaded_config, repository, flag_service)
+    repository.create_session(
+        SessionRecord(id="done", mode_id="score", level_id="level_1", nickname="Ada",
+                      status=SessionStatus.EXPIRED)
+    )
+
+    async def scenario():
+        lock = engine._session_lock("done")
+        await lock.acquire()
+
+        async def waiter():
+            async with engine._session_lock("done"):
+                return engine._session_locks.get("done")
+
+        task = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        lock.release()
+        assert engine.prune_locks() == 0
+        assert engine._session_locks["done"] is lock
+        assert await task is lock
+
+    asyncio.run(scenario())
