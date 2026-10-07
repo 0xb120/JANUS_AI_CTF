@@ -697,3 +697,51 @@ class ChallengeEngine:
             "nickname": self.repository.latest_nickname_for_owner(owner_id),
             "active_sessions": active,
         }
+
+    async def expire_if_due(self, session_id: str) -> bool:
+        try:
+            async with self._session_lock(session_id):
+                if self.repository.get_session(session_id).status is not SessionStatus.ACTIVE:
+                    return False
+                return self.get_session(session_id).status is SessionStatus.EXPIRED
+        except NotFoundError:
+            return False
+
+    def prune_locks(self) -> int:
+        removed = 0
+        for session_id, lock in list(self._session_locks.items()):
+            if lock.locked():
+                continue
+            try:
+                active = self.repository.get_session(session_id).status is SessionStatus.ACTIVE
+            except NotFoundError:
+                active = False
+            if not active:
+                # Safe: acquiring a lock never yields between lookup and acquire,
+                # and a free lock has no waiters.
+                del self._session_locks[session_id]
+                removed += 1
+        # Owner locks are recreated on demand and nothing awaits a free one.
+        for owner_id, lock in list(self._owner_locks.items()):
+            if not lock.locked():
+                del self._owner_locks[owner_id]
+                removed += 1
+        return removed
+
+    def sweep_orphan_audio(self, max_age_seconds: float, now: float | None = None) -> int:
+        output_dir = getattr(self.tts, "output_dir", None)
+        if output_dir is None:
+            return 0
+        horizon = (time.time() if now is None else now) - max_age_seconds
+        removed = 0
+        for path in Path(output_dir).glob("*.wav"):
+            if path.stem in self._audio_session:
+                continue
+            try:
+                stale = path.stat().st_mtime < horizon
+            except OSError:
+                continue
+            if stale:
+                self.tts.delete(path.stem)
+                removed += 1
+        return removed

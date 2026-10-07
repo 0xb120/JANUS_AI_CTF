@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import tempfile
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -47,6 +49,7 @@ from .security import (
     hash_recovery_code,
     normalize_recovery_code,
 )
+from .sweeper import SessionSweeper
 
 
 class APIModel(BaseModel):
@@ -92,12 +95,14 @@ class AppContainer:
         engine: ChallengeEngine,
         *,
         rate_limiter: RateLimiter,
+        sweeper: SessionSweeper,
         player_tokens: PlayerTokenService,
         access_codes: AccessCodeVerifier | None,
     ) -> None:
         self.config = config
         self.engine = engine
         self.rate_limiter = rate_limiter
+        self.sweeper = sweeper
         self.player_tokens = player_tokens
         self.access_codes = access_codes
 
@@ -184,10 +189,24 @@ def create_app(
     access_codes = AccessCodeVerifier.from_env(online.access_codes_env) if online.enabled else None
     player_tokens = PlayerTokenService(flag_service.derive_subkey(PLAYER_TOKEN_LABEL))
     rate_limiter = RateLimiter()
+    sweeper = SessionSweeper(engine, rate_limiter=rate_limiter)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        task = asyncio.create_task(sweeper.run())
+        await asyncio.sleep(0)
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     container = AppContainer(
         config,
         engine,
         rate_limiter=rate_limiter,
+        sweeper=sweeper,
         player_tokens=player_tokens,
         access_codes=access_codes,
     )
@@ -197,6 +216,7 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=f"{config.app.api_prefix}/openapi.json",
+        lifespan=lifespan,
     )
     app.state.janus = container
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.app.effective_allowed_hosts())
