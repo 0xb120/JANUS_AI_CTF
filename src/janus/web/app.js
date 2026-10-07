@@ -145,6 +145,26 @@
       const query = new URLSearchParams({ level_id: levelId, limit: String(limit) });
       return this.request(`/leaderboard?${query}`, { timeoutMs: 8_000 });
     },
+
+    join(code) {
+      return this.request("/join", { method: "POST", body: { code }, timeoutMs: 8_000 });
+    },
+
+    recover(recoveryCode) {
+      return this.request("/recover", { method: "POST", body: { recovery_code: recoveryCode }, timeoutMs: 8_000 });
+    },
+
+    me() {
+      return this.request("/players/me", { timeoutMs: 6_000 });
+    },
+
+    getSession(sessionId) {
+      return this.request(`/sessions/${encodeURIComponent(sessionId)}`, { timeoutMs: 6_000 });
+    },
+
+    history(sessionId) {
+      return this.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, { timeoutMs: 8_000 });
+    },
   };
 
   class ApiError extends Error {
@@ -199,6 +219,9 @@
   };
 
   const state = {
+    online: false,
+    resumeCandidate: null,
+    composerLockedUntil: 0,
     config: DEFAULT_CONFIG,
     mode: "stand",
     levels: DEFAULT_LEVELS,
@@ -264,16 +287,197 @@
 
     await Promise.all([minimumBoot, updateHealth()]);
     els.app.hidden = false;
-    showScreen("attract");
+    state.online = Boolean(state.config.app?.online);
+    if (state.online) await enterOnline();
+    else showScreen("attract");
     els.bootScreen.classList.add("is-leaving");
     window.setTimeout(() => els.bootScreen.remove(), 650);
     if (configWarning) toast(configWarning, "warning", 6000);
     window.setInterval(updateHealth, 15_000);
   }
 
+  function errorCode(error) {
+    return error?.payload?.error?.code || "";
+  }
+
+  function retryAfterSeconds(error) {
+    return Math.max(1, Number(error?.payload?.error?.details?.retry_after) || 5);
+  }
+
+  function selectAccessTab(tab) {
+    const join = tab === "join";
+    els.accessTabJoin.setAttribute("aria-selected", String(join));
+    els.accessTabRecover.setAttribute("aria-selected", String(!join));
+    els.joinForm.hidden = !join;
+    els.recoverForm.hidden = join;
+    (join ? els.accessCodeInput : els.recoveryCodeInput).focus();
+  }
+
+  function showAccess(message) {
+    els.recoveryCard.hidden = true;
+    els.accessTabs.hidden = false;
+    els.joinError.textContent = "";
+    els.recoverError.textContent = "";
+    selectAccessTab("join");
+    showScreen("access");
+    if (message) toast(message, "warning", 6000);
+  }
+
+  function accessErrorMessage(error) {
+    if (error.status === 429) return `Troppi tentativi: riprova tra ${retryAfterSeconds(error)} s.`;
+    if (error.status === 401) return "Codice non valido.";
+    return error.message;
+  }
+
+  async function enterOnline() {
+    try {
+      adoptPlayer(await API.me());
+      showScreen("attract");
+    } catch (error) {
+      if (error.status === 401) showAccess();
+      else {
+        showScreen("attract");
+        toast(error.message, "error", 6000);
+      }
+    }
+  }
+
+  function adoptPlayer(me) {
+    if (me.nickname) state.latestNickname = me.nickname;
+    const active = (me.active_sessions || [])[0] || null;
+    state.resumeCandidate = active;
+    els.resumeBanner.hidden = !active;
+    if (active) {
+      const level = getLevel(active.level_id);
+      els.resumeText.textContent = `Partita in corso: ${level?.name || active.level_id} — tempo residuo ${formatDuration(active.remaining_seconds)}.`;
+    }
+  }
+
+  async function submitJoin(event) {
+    event.preventDefault();
+    const code = els.accessCodeInput.value.trim();
+    if (!code) {
+      els.joinError.textContent = "Inserisci il codice evento.";
+      return;
+    }
+    setButtonLoading(els.joinButton, true, "VERIFICA…");
+    try {
+      const result = await API.join(code);
+      els.accessCodeInput.value = "";
+      els.recoveryCodeValue.textContent = result.recovery_code;
+      els.joinForm.hidden = true;
+      els.recoverForm.hidden = true;
+      els.accessTabs.hidden = true;
+      els.recoveryCard.hidden = false;
+      els.recoverySavedButton.focus();
+    } catch (error) {
+      els.joinError.textContent = accessErrorMessage(error);
+    } finally {
+      setButtonLoading(els.joinButton, false);
+    }
+  }
+
+  async function submitRecover(event) {
+    event.preventDefault();
+    const code = els.recoveryCodeInput.value.trim();
+    if (!code) {
+      els.recoverError.textContent = "Inserisci il codice di recupero.";
+      return;
+    }
+    setButtonLoading(els.recoverButton, true, "VERIFICA…");
+    try {
+      await API.recover(code);
+      els.recoveryCodeInput.value = "";
+      await enterOnline();
+    } catch (error) {
+      els.recoverError.textContent = accessErrorMessage(error);
+    } finally {
+      setButtonLoading(els.recoverButton, false);
+    }
+  }
+
+  async function copyRecoveryCode() {
+    try {
+      await navigator.clipboard.writeText(els.recoveryCodeValue.textContent);
+      toast("Codice copiato.", "info", 2500);
+    } catch {
+      toast("Copia non riuscita: annota il codice a mano.", "warning", 4000);
+    }
+  }
+
+  async function resumeSession() {
+    const candidate = state.resumeCandidate;
+    if (!candidate) return;
+    try {
+      const [rawSession, history] = await Promise.all([API.getSession(candidate.id), API.history(candidate.id)]);
+      state.sessionEpoch += 1;
+      state.session = normalizeSession(rawSession, candidate.level_id, state.latestNickname);
+      state.selectedLevelId = state.session.level_id;
+      enterGame({});
+      const messages = history.messages || [];
+      for (const item of messages) {
+        addMessage(item.role === "assistant" ? "assistant" : "user", item.content, { language: item.language });
+      }
+      if (messages.some(item => item.content.includes("[REDACTED_SESSION_FLAG]"))) {
+        addMessage("system", "Per sicurezza la flag non viene mai salvata: nella cronologia ripresa appare oscurata.");
+      }
+      setTimerRemaining(candidate.remaining_seconds);
+      els.resumeBanner.hidden = true;
+      state.resumeCandidate = null;
+    } catch (error) {
+      if (error.status === 401) return showAccess("Accesso scaduto: rientra con il codice.");
+      els.resumeBanner.hidden = true;
+      state.resumeCandidate = null;
+      toast(error.status === 404 ? "La partita non è più disponibile." : error.message, "warning", 5000);
+    }
+  }
+
+  async function abandonResumable() {
+    const candidate = state.resumeCandidate;
+    if (!candidate) return;
+    try {
+      await API.deleteSession(candidate.id);
+    } catch (error) {
+      if (error.status !== 404) toast(error.message, "error", 5000);
+    }
+    els.resumeBanner.hidden = true;
+    state.resumeCandidate = null;
+  }
+
+  function lockComposerFor(seconds, reason) {
+    const until = Date.now() + seconds * 1000;
+    state.composerLockedUntil = until;
+    setControlsEnabled(false);
+    toast(`${reason}: riprova tra ${seconds} s.`, "warning", Math.min(seconds, 10) * 1000);
+    window.setTimeout(() => {
+      if (state.composerLockedUntil !== until) return;
+      state.composerLockedUntil = 0;
+      if (!state.busy) setControlsEnabled(true);
+    }, seconds * 1000);
+  }
+
   function cacheElements() {
     Object.assign(els, {
       app: $("#app"),
+      accessTabs: $("#accessTabs"),
+      accessTabJoin: $("#accessTabJoin"),
+      accessTabRecover: $("#accessTabRecover"),
+      joinForm: $("#joinForm"),
+      accessCodeInput: $("#accessCodeInput"),
+      joinError: $("#joinError"),
+      joinButton: $("#joinButton"),
+      recoverForm: $("#recoverForm"),
+      recoveryCodeInput: $("#recoveryCodeInput"),
+      recoverError: $("#recoverError"),
+      recoverButton: $("#recoverButton"),
+      recoveryCard: $("#recoveryCard"),
+      recoveryCodeValue: $("#recoveryCodeValue"),
+      copyRecoveryButton: $("#copyRecoveryButton"),
+      recoverySavedButton: $("#recoverySavedButton"),
+      resumeBanner: $("#resumeBanner"),
+      resumeText: $("#resumeText"),
+      resumeButton: $("#resumeButton"),
+      abandonButton: $("#abandonButton"),
       bootScreen: $("#bootScreen"),
       bootMessage: $("#bootMessage"),
       healthDot: $("#healthDot"),
@@ -345,6 +549,14 @@
   }
 
   function bindEvents() {
+    els.joinForm.addEventListener("submit", event => { void submitJoin(event); });
+    els.recoverForm.addEventListener("submit", event => { void submitRecover(event); });
+    els.accessTabJoin.addEventListener("click", () => selectAccessTab("join"));
+    els.accessTabRecover.addEventListener("click", () => selectAccessTab("recover"));
+    els.copyRecoveryButton.addEventListener("click", () => { void copyRecoveryCode(); });
+    els.recoverySavedButton.addEventListener("click", () => { void enterOnline(); });
+    els.resumeButton.addEventListener("click", () => { void resumeSession(); });
+    els.abandonButton.addEventListener("click", () => { void abandonResumable(); });
     els.beginButton.addEventListener("click", () => { void openSetup(); });
     els.openLeaderboardButton.addEventListener("click", () => openLeaderboard("attract"));
     els.setupBackButton.addEventListener("click", () => {
@@ -644,6 +856,12 @@
     els.nicknameInput.value = "";
     els.nicknameCounter.textContent = "0/24";
     els.nicknameError.textContent = "";
+    const lockedNickname = state.online && state.mode === "score" ? state.latestNickname : "";
+    els.nicknameInput.readOnly = Boolean(lockedNickname);
+    if (lockedNickname) {
+      els.nicknameInput.value = lockedNickname;
+      els.nicknameCounter.textContent = `${lockedNickname.length}/24`;
+    }
     showScreen("setup");
     window.setTimeout(() => {
       if (state.mode === "score") els.nicknameInput.focus();
@@ -701,6 +919,15 @@
       enterGame(payload);
     } catch (error) {
       if (attempt !== state.startAttempt || state.screen !== "setup") return;
+      if (errorCode(error) === "nickname_taken") {
+        els.nicknameError.textContent = "Nickname già in uso da un altro giocatore.";
+        els.nicknameInput.focus();
+        return;
+      }
+      if (state.online && error.status === 401) {
+        showAccess("Accesso scaduto: rientra con il codice.");
+        return;
+      }
       setAvatarState("alert");
       toast(error.message, "error", 6500);
       window.setTimeout(() => setAvatarState("idle"), 900);
@@ -800,7 +1027,13 @@
       });
       updateDetectedLanguage(response.language);
     } catch (error) {
-      if (isCurrentSession(sessionId, epoch)) handleTurnError(error);
+      if (isCurrentSession(sessionId, epoch)) {
+        if (["llm_busy", "rate_limited", "turn_in_progress"].includes(errorCode(error))) {
+          els.messageInput.value = text;
+          autoSizeComposer();
+        }
+        handleTurnError(error);
+      }
     } finally {
       if (isCurrentSession(sessionId, epoch)) {
         setBusy(false);
@@ -1103,7 +1336,7 @@
   }
 
   function setControlsEnabled(enabled) {
-    const active = enabled && state.session?.status === "active";
+    const active = enabled && state.session?.status === "active" && Date.now() >= (state.composerLockedUntil || 0);
     const level = getLevel(state.session?.level_id);
     els.messageInput.disabled = !active;
     els.sendButton.disabled = !active;
@@ -1114,6 +1347,26 @@
   }
 
   function handleTurnError(error) {
+    const code = errorCode(error);
+    if (state.online && error.status === 401) {
+      showAccess("Accesso scaduto: rientra con il codice o con il codice di recupero.");
+      return;
+    }
+    if (code === "turn_in_progress") {
+      toast("JANUS sta ancora rispondendo: attendi la risposta.", "warning", 4000);
+      return;
+    }
+    if (error.status === 429 || code === "llm_busy") {
+      addMessage("error", "Messaggio non inviato: riprova tra poco.");
+      lockComposerFor(retryAfterSeconds(error), code === "llm_busy" ? "JANUS è sovraccarico" : "Troppe richieste");
+      return;
+    }
+    if (state.online && error.status === 404) {
+      state.session = null;
+      toast("Sessione non trovata.", "warning", 5000);
+      showScreen("attract");
+      return;
+    }
     if (error.status === 409 && state.session?.status === "active") {
       state.session.status = "timed_out";
       toast("La sessione non è più attiva. Avvia una nuova sfida.", "warning", 6000);
@@ -1293,7 +1546,8 @@
     els.resultHints.textContent = padNumber(state.session?.hints_used || 0);
     showScreen("result");
     setAvatarState(success ? "compromised" : "alert");
-    if (state.mode === "stand") startResultResetCountdown();
+    // The automatic return to attract exists for the next kiosk participant only.
+    if (state.mode === "stand" && !state.online) startResultResetCountdown();
   }
 
   function startResultResetCountdown() {

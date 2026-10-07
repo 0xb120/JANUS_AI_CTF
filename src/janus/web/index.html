@@ -42,6 +42,54 @@
     </header>
 
     <main class="screen-stack">
+      <!-- ACCESS (online only) ------------------------------------------ -->
+      <section class="screen screen-access" id="screenAccess" data-screen="access" aria-labelledby="accessTitle">
+        <div class="section-heading">
+          <p class="eyebrow">ACCESSO ONLINE</p>
+          <h2 id="accessTitle">Entra nella sfida.</h2>
+          <p>I messaggi che invii vengono elaborati dal modello IA configurato per l'evento.</p>
+        </div>
+
+        <div class="segmented access-tabs" id="accessTabs" role="tablist" aria-label="Modalità di accesso">
+          <button type="button" role="tab" id="accessTabJoin" aria-selected="true" aria-controls="joinForm">CODICE EVENTO</button>
+          <button type="button" role="tab" id="accessTabRecover" aria-selected="false" aria-controls="recoverForm">CODICE DI RECUPERO</button>
+        </div>
+
+        <form class="setup-form" id="joinForm" novalidate>
+          <div class="setup-block">
+            <div class="field-heading"><label for="accessCodeInput">CODICE EVENTO</label><span>fornito dagli organizzatori</span></div>
+            <div class="input-frame">
+              <span aria-hidden="true">&gt;</span>
+              <input id="accessCodeInput" type="text" maxlength="256" autocomplete="off" spellcheck="false" placeholder="Inserisci il codice">
+            </div>
+            <p class="field-error" id="joinError" role="alert"></p>
+          </div>
+          <button class="btn btn-primary btn-wide" id="joinButton" type="submit"><span>ENTRA</span><span class="btn-arrow" aria-hidden="true">→</span></button>
+        </form>
+
+        <form class="setup-form" id="recoverForm" novalidate hidden>
+          <div class="setup-block">
+            <div class="field-heading"><label for="recoveryCodeInput">CODICE DI RECUPERO</label><span>formato RCV-XXXX-XXXX-XXXX-XXXX</span></div>
+            <div class="input-frame">
+              <span aria-hidden="true">&gt;</span>
+              <input id="recoveryCodeInput" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="RCV-…">
+            </div>
+            <p class="field-error" id="recoverError" role="alert"></p>
+          </div>
+          <button class="btn btn-primary btn-wide" id="recoverButton" type="submit"><span>RIPRENDI</span><span class="btn-arrow" aria-hidden="true">→</span></button>
+        </form>
+
+        <div class="recovery-card" id="recoveryCard" hidden>
+          <p class="eyebrow">IL TUO CODICE DI RECUPERO</p>
+          <code id="recoveryCodeValue"></code>
+          <p>Conservalo: serve per riprendere la partita da un altro dispositivo. Non verrà mostrato di nuovo.</p>
+          <div class="attract-actions">
+            <button class="btn btn-ghost" id="copyRecoveryButton" type="button">COPIA</button>
+            <button class="btn btn-primary" id="recoverySavedButton" type="button"><span>L'HO SALVATO</span><span class="btn-arrow" aria-hidden="true">→</span></button>
+          </div>
+        </div>
+      </section>
+
       <!-- ATTRACT -------------------------------------------------------- -->
       <section class="screen screen-attract is-active" id="screenAttract" data-screen="attract" aria-labelledby="attractTitle">
         <div class="attract-copy">
@@ -54,6 +102,14 @@
               <span>SFIDA JANUS</span><span class="btn-arrow" aria-hidden="true">↗</span>
             </button>
             <button class="btn btn-ghost score-only" id="openLeaderboardButton" type="button">CLASSIFICA</button>
+          </div>
+
+          <div class="resume-banner" id="resumeBanner" role="status" hidden>
+            <p id="resumeText"></p>
+            <div class="attract-actions">
+              <button class="btn btn-primary" id="resumeButton" type="button"><span>RIPRENDI</span></button>
+              <button class="btn btn-ghost" id="abandonButton" type="button">ABBANDONA</button>
+            </div>
           </div>
 
           <div class="mini-instructions" aria-label="Come si gioca">
