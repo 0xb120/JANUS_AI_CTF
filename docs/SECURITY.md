@@ -51,13 +51,33 @@ flowchart LR
 
 - La CLI accetta soltanto 127.0.0.1 o localhost.
 - Start-Janus forza 127.0.0.1.
-- Gli URL LLM devono avere host 127.0.0.1, localhost o ::1.
+- Gli URL LLM devono avere host 127.0.0.1, localhost o ::1, salvo il provider
+  opzionale `huggingface`, vincolato a `https://router.huggingface.co`.
 - TrustedHostMiddleware usa l'allowlist YAML.
 - CORS usa origini localhost e non abilita credenziali.
 - I provider non accettano un URL remoto passato per singola richiesta.
 
 Ollama o il server OpenAI-compatible devono essere configurati a loro volta per
 non ascoltare sulla LAN.
+
+### Inferenza remota Hugging Face (opzionale)
+
+Con `llm.provider: huggingface` il perimetro cambia:
+
+- system prompt, flag di sessione e messaggi dei partecipanti vengono inviati
+  a Hugging Face e all'operatore di inferenza (es. `:nscale`); il segreto di
+  gioco lascia la macchina, la chiave HMAC no;
+- la postazione necessita di uscita Internet verso `router.huggingface.co` e
+  `huggingface.co`: l'assunzione "offline" non vale più;
+- senza suffisso di operatore il router può cambiare operatore nel tempo;
+  fissarlo quando contano accordi sul trattamento dei dati;
+- `HF_TOKEN` va trattato come segreto: solo variabile d'ambiente, mai YAML o
+  repository, permessi minimi (`inference.serverless.write`);
+- con `HF_BILL_TO` l'health check verifica che il token possa addebitare
+  l'organizzazione, perché in caso contrario il router addebita l'account
+  personale senza segnalarlo;
+- informare i partecipanti che i messaggi sono elaborati da un servizio
+  esterno.
 
 ### Schemi e limiti
 

@@ -49,7 +49,8 @@ offline sulla stessa macchina.
 - tre challenge progressive su prompt injection, data exfiltration e confused
   deputy;
 - modalità **Stand** anonima e modalità **Arena** con punteggio e leaderboard;
-- provider LLM per **Ollama**, server **OpenAI-compatible** e mock deterministico;
+- provider LLM per **Ollama**, server **OpenAI-compatible** e mock deterministico,
+  più l'opzione remota **Hugging Face Inference Providers**;
 - speech-to-text locale con **faster-whisper**;
 - text-to-speech locale con **Piper**, con fallback Windows SAPI;
 - persistenza SQLite, cleanup automatico e protezioni per l'esecuzione locale;
@@ -133,14 +134,17 @@ docker compose up -d --build
 Quando `docker compose ps` mostra `janus` come `healthy`, aprire
 `http://127.0.0.1:8000`. Per GPU NVIDIA aggiungere
 `-f docker-compose.yml -f docker-compose.gpu.yml`. Modalità, modello e voci si
-configurano tramite `.env`; dettagli in [docs/DOCKER.md](docs/DOCKER.md).
+configurano tramite `.env`; per usare Hugging Face al posto di Ollama
+aggiungere `-f docker-compose.yml -f docker-compose.hf.yml`. Dettagli in
+[docs/DOCKER.md](docs/DOCKER.md).
 
 ## Installazione completa
 
 ### Prerequisiti comuni
 
 - Python 3.11 o successivo;
-- Ollama o un server LLM OpenAI-compatible locale, salvo la modalità Demo;
+- Ollama o un server LLM OpenAI-compatible locale, oppure un token Hugging
+  Face per l'inferenza remota, salvo la modalità Demo;
 - accesso a Internet durante il solo download iniziale dei modelli;
 - spazio locale dedicato per modelli e dati runtime;
 - un browser moderno con supporto a `MediaRecorder` per il push-to-talk.
@@ -374,6 +378,63 @@ Avviare separatamente il server locale su `http://127.0.0.1:8080/v1`, quindi:
 Il `DataDir` contiene database, chiave e audio effimero. Per una leaderboard
 persistente è necessario conservare insieme database e chiave.
 
+### Hugging Face Inference Providers (remoto) — Windows e Linux
+
+In alternativa al server locale, il provider opzionale `huggingface` usa il
+router [Inference Providers](https://huggingface.co/docs/inference-providers)
+(`https://router.huggingface.co/v1`). STT e TTS restano locali. Serve un token
+fine-grained con il permesso **Make calls to Inference Providers**
+(`inference.serverless.write`), letto solo dalla variabile `HF_TOKEN`.
+
+> **Privacy e costi.** In questa modalità system prompt (inclusa la flag della
+> sessione) e messaggi dei partecipanti escono dalla macchina verso Hugging
+> Face e l'operatore di inferenza scelto; l'evento non è più offline e
+> l'inferenza è a consumo. Vedere [SECURITY.md](docs/SECURITY.md).
+
+Variabili d'ambiente:
+
+| Variabile | Obbligatoria | Significato |
+| --- | --- | --- |
+| `HF_TOKEN` | sì | Token Hugging Face |
+| `HF_BILL_TO` | no | Organizzazione (Team/Enterprise) a cui addebitare l'inferenza |
+
+Con `HF_BILL_TO` il token deve avere `inference.serverless.write` su quella
+organizzazione: altrimenti il router ignora l'header e addebita l'account
+personale senza errori. L'health check di JANUS rileva questo caso, oltre a
+token non valido e modello non servito.
+
+Il modello accetta un suffisso che fissa l'operatore (`:nscale`) o una policy
+del router (`:fastest`, `:cheapest`). Senza suffisso il router sceglie
+l'operatore e può cambiarlo nel tempo: fissarlo quando conta sapere dove
+transitano i dati.
+
+**Windows:**
+
+```powershell
+$env:HF_TOKEN = "hf_..."
+$env:HF_BILL_TO = "my-org"   # opzionale
+.\JANUS_STAND.cmd -Provider huggingface -Model Qwen/Qwen3-4B-Instruct-2507:nscale
+```
+
+**Linux:**
+
+```bash
+export HF_TOKEN=hf_...
+export HF_BILL_TO=my-org   # opzionale
+.venv/bin/python -m janus \
+  --mode stand \
+  --llm-provider huggingface \
+  --llm-model Qwen/Qwen3-4B-Instruct-2507:nscale \
+  --data-dir "$HOME/.local/share/janus/runtime"
+```
+
+Per la voce locale aggiungere le stesse opzioni `--stt-*` e `--piper-*`
+dell'esempio Ollama, oppure `--stt-provider disabled --tts-provider disabled`.
+
+Cambiando provider da CLI senza `--llm-base-url` viene usato l'endpoint
+predefinito del nuovo provider. In `configs/app.yaml` la scelta equivalente è
+`llm.provider: huggingface` con `llm.model` impostato.
+
 ## Configurazione
 
 La configurazione dichiarativa è suddivisa in:
@@ -436,7 +497,9 @@ traversal degli artefatti audio.
 
 JANUS è progettato come laboratorio locale e consensuale:
 
-- API e provider LLM accettano soltanto endpoint loopback;
+- API e provider LLM locali accettano soltanto endpoint loopback; l'unica
+  eccezione, da scegliere esplicitamente, è il provider `huggingface`, limitato
+  a `https://router.huggingface.co`;
 - Trusted Host e CORS sono limitati alla macchina locale;
 - ogni sessione usa una flag HMAC distinta e confronti constant-time;
 - il tool `diagnostics.collect` è un simulatore in memoria senza accesso a rete,
@@ -465,7 +528,7 @@ JANUS_AI_CTF/
 ├── docs/                    # Architettura, sicurezza e runbook
 ├── scripts/                 # Helper Windows e utility Python multipiattaforma
 ├── src/janus/               # Backend, provider e frontend kiosk
-│   ├── providers/           # Ollama/OpenAI-compatible, STT e TTS
+│   ├── providers/           # Ollama/OpenAI-compatible/Hugging Face, STT e TTS
 │   └── web/                 # HTML, CSS e JavaScript
 ├── tests/                   # Suite pytest
 ├── JANUS_DEMO.cmd           # Demo Windows senza modelli
@@ -474,6 +537,7 @@ JANUS_AI_CTF/
 ├── Dockerfile               # Immagine backend/kiosk
 ├── docker-compose.yml       # Stack completo Ollama + modelli + JANUS
 ├── docker-compose.gpu.yml   # Override GPU NVIDIA per Ollama
+├── docker-compose.hf.yml    # Override Hugging Face al posto di Ollama
 └── pyproject.toml           # Packaging e dipendenze
 ```
 

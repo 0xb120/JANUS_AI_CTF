@@ -20,6 +20,7 @@ from .engine import ChallengeEngine
 from .errors import JanusError, NotFoundError, ValidationError
 from .providers.llm import (
     FallbackLLMProvider,
+    HuggingFaceProvider,
     LLMProvider,
     MockLLMProvider,
     OllamaProvider,
@@ -71,6 +72,8 @@ def _build_llm(config: LoadedConfig) -> LLMProvider:
         return MockLLMProvider()
     if settings.provider == "ollama":
         provider: LLMProvider = OllamaProvider(settings)
+    elif settings.provider == "huggingface":
+        provider = HuggingFaceProvider(settings)
     else:
         provider = OpenAICompatibleProvider(settings)
     return FallbackLLMProvider(provider) if settings.fallback_to_mock else provider

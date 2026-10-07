@@ -112,6 +112,10 @@ Sono implementati:
 
 - Ollama: POST /api/chat e health su /api/tags;
 - OpenAI-compatible: POST /chat/completions e health su /models;
+- Hugging Face (remoto, opzionale): POST /chat/completions sul router
+  Inference Providers con header X-HF-Bill-To facoltativo; health su
+  whoami-v2 (validità del token e diritto di addebito all'organizzazione) e
+  sul catalogo /models del router (modello e operatore fissato);
 - MockLLMProvider: comportamento deterministico per test e DEMO;
 - FallbackLLMProvider: disponibile soltanto se fallback_to_mock è true.
 
@@ -119,9 +123,14 @@ La configurazione evento mantiene fallback_to_mock false. L'health check segnala
 degraded se un fallback mock è attivo; Start-Janus rifiuta inoltre un provider
 reale non disponibile.
 
-Gli URL provider vengono validati: host ammessi 127.0.0.1, localhost o ::1.
+Gli URL provider vengono validati: host ammessi 127.0.0.1, localhost o ::1;
+il solo provider huggingface accetta esclusivamente
+https://router.huggingface.co. Il token Hugging Face è letto soltanto dalla
+variabile d'ambiente HF_TOKEN.
 Il thinking di Qwen è disabilitato tramite think false per Ollama e
-chat_template_kwargs.enable_thinking false per OpenAI-compatible.
+chat_template_kwargs.enable_thinking false per OpenAI-compatible; verso il
+router Hugging Face il campo non viene inviato, perché non tutti gli
+operatori lo supportano.
 
 ### STT
 
@@ -289,7 +298,8 @@ ma non sostituisce un backend o un LLM reale.
 - Start-Janus forza 127.0.0.1.
 - TrustedHostMiddleware accetta soltanto host configurati.
 - CORS accetta origini localhost configurate e nessuna credenziale.
-- I provider LLM accettano soltanto URL loopback.
+- I provider LLM locali accettano soltanto URL loopback; huggingface solo il
+  router https://router.huggingface.co.
 
 Non sono implementati autenticazione utente, pannello admin o accesso remoto:
 l'isolamento dipende dal bind locale, dal kiosk e dal presidio fisico.

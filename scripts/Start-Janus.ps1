@@ -2,7 +2,7 @@ param(
     [ValidateSet("stand", "score")]
     [string]$Mode = "stand",
 
-    [ValidateSet("openai_compatible", "ollama", "mock")]
+    [ValidateSet("openai_compatible", "ollama", "huggingface", "mock")]
     [string]$Provider = "ollama",
 
     [string]$Model = "",
@@ -23,14 +23,21 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $configDir = Join-Path $projectRoot "configs"
 
 if ([string]::IsNullOrWhiteSpace($Model)) {
-    $Model = if ($Provider -eq "ollama") { "qwen3:4b-instruct" } else { "qwen3-4b-janus" }
+    $Model = switch ($Provider) {
+        "ollama" { "qwen3:4b-instruct" }
+        "huggingface" { "Qwen/Qwen3-4B-Instruct-2507" }
+        default { "qwen3-4b-janus" }
+    }
 }
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
-    $BaseUrl = if ($Provider -eq "ollama") {
-        "http://127.0.0.1:11434"
-    } else {
-        "http://127.0.0.1:8080/v1"
+    $BaseUrl = switch ($Provider) {
+        "ollama" { "http://127.0.0.1:11434" }
+        "huggingface" { "https://router.huggingface.co/v1" }
+        default { "http://127.0.0.1:8080/v1" }
     }
+}
+if ($Provider -eq "huggingface" -and [string]::IsNullOrWhiteSpace($env:HF_TOKEN)) {
+    throw "Variabile HF_TOKEN assente: impostarla (ed eventualmente HF_BILL_TO) prima di usare -Provider huggingface."
 }
 
 if ([string]::IsNullOrWhiteSpace($DataDir)) {

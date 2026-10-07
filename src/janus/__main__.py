@@ -22,9 +22,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["mock", "openai_compatible", "ollama"],
+        choices=["mock", "openai_compatible", "ollama", "huggingface"],
         default=None,
-        help="Override the configured local inference provider.",
+        help=(
+            "Override the configured inference provider. huggingface is the only remote "
+            "option and reads its token from HF_TOKEN."
+        ),
     )
     parser.add_argument("--llm-base-url", default=None)
     parser.add_argument("--llm-model", default=None)
@@ -65,9 +68,14 @@ def main() -> None:
     if args.llm_model is not None:
         llm_updates["model"] = args.llm_model
     if llm_updates:
-        app_updates["llm"] = LLMSettings.model_validate(
-            {**config.app.llm.model_dump(), **llm_updates}
-        )
+        current_llm = config.app.llm.model_dump()
+        if (
+            args.llm_provider not in (None, config.app.llm.provider)
+            and args.llm_base_url is None
+        ):
+            # The configured URL belongs to the previous provider: use the new one's default.
+            del current_llm["base_url"]
+        app_updates["llm"] = LLMSettings.model_validate({**current_llm, **llm_updates})
     speech_updates: dict[str, object] = {}
     if args.stt_model is not None:
         speech_updates["stt_model"] = args.stt_model

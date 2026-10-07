@@ -38,3 +38,59 @@ def test_cli_cannot_bypass_local_llm_url_validation(monkeypatch):
     )
     with pytest.raises(PydanticValidationError, match="local machine"):
         main()
+
+
+def test_huggingface_provider_defaults_to_router_and_hf_environment():
+    settings = LLMSettings(provider="huggingface", model="Qwen/Qwen3-4B-Instruct-2507")
+
+    assert settings.base_url == "https://router.huggingface.co/v1"
+    assert settings.api_key_env == "HF_TOKEN"
+    assert settings.bill_to_env == "HF_BILL_TO"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://models.example.com/v1",
+        "http://router.huggingface.co/v1",
+        "http://127.0.0.1:8080/v1",
+    ],
+)
+def test_huggingface_provider_only_accepts_the_https_router(base_url):
+    with pytest.raises(PydanticValidationError, match="Hugging Face provider only accepts"):
+        LLMSettings(provider="huggingface", base_url=base_url)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai_compatible"])
+def test_local_providers_still_reject_the_remote_router(provider):
+    with pytest.raises(PydanticValidationError, match="local machine"):
+        LLMSettings(provider=provider, base_url="https://router.huggingface.co/v1")
+
+
+def _run_main_and_capture_config(monkeypatch, argv):
+    import janus.__main__ as entrypoint
+
+    captured = {}
+    monkeypatch.setattr(sys, "argv", ["janus", *argv])
+    monkeypatch.setattr(
+        entrypoint, "create_app", lambda loaded_config: captured.setdefault("config", loaded_config)
+    )
+    monkeypatch.setattr(entrypoint.uvicorn, "run", lambda *args, **kwargs: None)
+    main()
+    return captured["config"].app.llm
+
+
+def test_cli_provider_switch_uses_the_new_provider_default_url(monkeypatch):
+    llm = _run_main_and_capture_config(
+        monkeypatch, ["--llm-provider", "huggingface", "--llm-model", "Qwen/Qwen3-4B-Instruct-2507"]
+    )
+
+    assert llm.provider == "huggingface"
+    assert llm.base_url == "https://router.huggingface.co/v1"
+    assert llm.api_key_env == "HF_TOKEN"
+
+
+def test_cli_keeps_the_configured_url_when_the_provider_is_unchanged(monkeypatch):
+    llm = _run_main_and_capture_config(monkeypatch, ["--llm-provider", "ollama"])
+
+    assert llm.base_url == "http://127.0.0.1:11434"

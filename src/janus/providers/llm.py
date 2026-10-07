@@ -1,4 +1,5 @@
-"""Asynchronous interfaces for local OpenAI-compatible and Ollama servers."""
+"""Asynchronous interfaces for local OpenAI-compatible and Ollama servers, plus the
+optional remote Hugging Face Inference Providers router."""
 
 from __future__ import annotations
 
@@ -6,7 +7,8 @@ import base64
 import inspect
 import os
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from typing import Protocol
 
 import httpx
@@ -160,6 +162,8 @@ class FallbackLLMProvider:
 
 
 class OpenAICompatibleProvider:
+    error_label = "Local LLM"
+
     def __init__(self, settings: LLMSettings, client: httpx.AsyncClient | None = None) -> None:
         self.settings = settings
         self._client = client
@@ -172,14 +176,10 @@ class OpenAICompatibleProvider:
                 headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
-    async def generate(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        temperature: float,
-        max_tokens: int,
-    ) -> str:
-        payload = {
+    def _payload(
+        self, messages: Sequence[ChatMessage], *, temperature: float, max_tokens: int
+    ) -> dict[str, object]:
+        return {
             "model": self.settings.model,
             "messages": [message.model_dump() for message in messages],
             "temperature": temperature,
@@ -187,6 +187,15 @@ class OpenAICompatibleProvider:
             "stream": False,
             "chat_template_kwargs": {"enable_thinking": self.settings.enable_thinking},
         }
+
+    async def generate(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        payload = self._payload(messages, temperature=temperature, max_tokens=max_tokens)
         try:
             if self._client is not None:
                 response = await self._client.post(
@@ -208,7 +217,7 @@ class OpenAICompatibleProvider:
                 raise ValueError("empty completion")
             return content.strip()
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ProviderError(f"Local LLM request failed: {exc}") from exc
+            raise ProviderError(f"{self.error_label} request failed: {exc}") from exc
 
     async def health(self) -> HealthComponent:
         try:
@@ -225,6 +234,130 @@ class OpenAICompatibleProvider:
             return HealthComponent(available=True, detail=self.settings.model)
         except httpx.HTTPError as exc:
             return HealthComponent(available=False, detail=str(exc))
+
+
+HF_WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
+HF_INFERENCE_PERMISSION = "inference.serverless.write"
+HF_ROUTING_POLICIES = frozenset({"fastest", "cheapest", "preferred"})
+
+
+class HuggingFaceProvider(OpenAICompatibleProvider):
+    """Remote inference through the Hugging Face Inference Providers router.
+
+    The model may pin an operator (``org/model:provider``) or a routing policy
+    (``org/model:cheapest``); without a suffix the router chooses the operator.
+    """
+
+    error_label = "Hugging Face"
+
+    @staticmethod
+    def _env(name: str | None) -> str | None:
+        if not name:
+            return None
+        return os.environ.get(name, "").strip() or None
+
+    def _headers(self) -> dict[str, str]:
+        headers = super()._headers()
+        bill_to = self._env(self.settings.bill_to_env)
+        if bill_to:
+            headers["X-HF-Bill-To"] = bill_to
+        return headers
+
+    def _payload(
+        self, messages: Sequence[ChatMessage], *, temperature: float, max_tokens: int
+    ) -> dict[str, object]:
+        payload = super()._payload(messages, temperature=temperature, max_tokens=max_tokens)
+        # A vLLM/llama.cpp extension that router operators are not required to accept.
+        del payload["chat_template_kwargs"]
+        return payload
+
+    def _missing_token(self) -> str | None:
+        if self._env(self.settings.api_key_env) is None:
+            return f"Hugging Face is not configured: {self.settings.api_key_env} is not set"
+        return None
+
+    async def generate(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        missing = self._missing_token()
+        if missing:
+            raise ProviderError(missing)
+        return await super().generate(messages, temperature=temperature, max_tokens=max_tokens)
+
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[httpx.AsyncClient]:
+        if self._client is not None:
+            yield self._client
+        else:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                yield client
+
+    def _billing_problem(self, identity: dict) -> str | None:
+        bill_to = self._env(self.settings.bill_to_env)
+        if bill_to is None:
+            return None
+        token = identity.get("auth", {}).get("accessToken", {})
+        if token.get("role") == "fineGrained":
+            allowed = any(
+                scope.get("entity", {}).get("name") == bill_to
+                and HF_INFERENCE_PERMISSION in scope.get("permissions", [])
+                for scope in token.get("fineGrained", {}).get("scoped", [])
+            )
+        else:
+            allowed = any(org.get("name") == bill_to for org in identity.get("orgs", []))
+        if allowed:
+            return None
+        # Without this grant the router ignores X-HF-Bill-To and bills the user silently.
+        return (
+            f"Hugging Face token cannot bill {bill_to}: grant {HF_INFERENCE_PERMISSION} "
+            "on that organization"
+        )
+
+    def _model_problem(self, catalog: dict) -> str | None:
+        model_id, _, route = self.settings.model.partition(":")
+        entry = next(
+            (item for item in catalog.get("data", []) if item.get("id") == model_id), None
+        )
+        if entry is None:
+            return f"{model_id} is not served by any Hugging Face inference provider"
+        if route and route not in HF_ROUTING_POLICIES:
+            providers = {item.get("provider") for item in entry.get("providers", [])}
+            if route not in providers:
+                return f"{model_id} is not served by the {route!r} inference provider"
+        return None
+
+    async def health(self) -> HealthComponent:
+        missing = self._missing_token()
+        if missing:
+            return HealthComponent(available=False, detail=missing)
+        try:
+            async with self._session() as client:
+                # The router lists models even for invalid tokens, so verify the token itself.
+                identity = await client.get(
+                    HF_WHOAMI_URL,
+                    headers={"Authorization": self._headers()["Authorization"]},
+                )
+                if identity.status_code in {401, 403}:
+                    return HealthComponent(
+                        available=False, detail="Hugging Face rejected the configured token"
+                    )
+                identity.raise_for_status()
+                problem = self._billing_problem(identity.json())
+                if problem is None:
+                    catalog = await client.get(
+                        f"{self.settings.base_url}/models", headers=self._headers()
+                    )
+                    catalog.raise_for_status()
+                    problem = self._model_problem(catalog.json())
+        except (httpx.HTTPError, AttributeError, TypeError, ValueError) as exc:
+            return HealthComponent(available=False, detail=f"Hugging Face is unreachable: {exc}")
+        if problem:
+            return HealthComponent(available=False, detail=problem)
+        return HealthComponent(available=True, detail=f"{self.settings.model} via Hugging Face")
 
 
 class OllamaProvider:

@@ -21,26 +21,65 @@ class LocalizedText(StrictModel):
     en: str
 
 
+HUGGINGFACE_ROUTER_HOST = "router.huggingface.co"
+
+DEFAULT_LLM_BASE_URLS = {
+    "mock": "http://127.0.0.1:8080/v1",
+    "openai_compatible": "http://127.0.0.1:8080/v1",
+    "ollama": "http://127.0.0.1:11434",
+    "huggingface": f"https://{HUGGINGFACE_ROUTER_HOST}/v1",
+}
+
+
 class LLMSettings(StrictModel):
-    provider: Literal["mock", "openai_compatible", "ollama"] = "openai_compatible"
-    base_url: str = "http://127.0.0.1:8080/v1"
+    provider: Literal["mock", "openai_compatible", "ollama", "huggingface"] = (
+        "openai_compatible"
+    )
+    base_url: str = DEFAULT_LLM_BASE_URLS["openai_compatible"]
     model: str = "local-model"
     api_key_env: str | None = None
+    # Hugging Face only: names the variable holding the organization to bill.
+    bill_to_env: str | None = None
     timeout_seconds: float = Field(default=90.0, ge=1, le=600)
     temperature: float = Field(default=0.7, ge=0, le=2)
     max_tokens: int = Field(default=512, ge=16, le=8192)
     enable_thinking: bool = False
     fallback_to_mock: bool = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def provider_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        provider = data.get("provider", "openai_compatible")
+        if not data.get("base_url") and provider in DEFAULT_LLM_BASE_URLS:
+            data["base_url"] = DEFAULT_LLM_BASE_URLS[provider]
+        if provider == "huggingface":
+            # Secrets are read from the environment only, never from YAML.
+            data["api_key_env"] = data.get("api_key_env") or "HF_TOKEN"
+            data["bill_to_env"] = data.get("bill_to_env") or "HF_BILL_TO"
+        return data
+
     @field_validator("base_url")
     @classmethod
-    def local_urls_only(cls, value: str) -> str:
-        parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"}:
+    def http_urls_only(cls, value: str) -> str:
+        if urlparse(value).scheme not in {"http", "https"}:
             raise ValueError("LLM base_url must use HTTP(S)")
-        if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError("LLM providers must be bound to the local machine")
         return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def endpoint_matches_provider(self) -> LLMSettings:
+        parsed = urlparse(self.base_url)
+        if self.provider == "huggingface":
+            # The only remote endpoint JANUS talks to, and only when chosen explicitly.
+            if parsed.scheme != "https" or parsed.hostname != HUGGINGFACE_ROUTER_HOST:
+                raise ValueError(
+                    f"The Hugging Face provider only accepts https://{HUGGINGFACE_ROUTER_HOST}"
+                )
+        elif parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("LLM providers must be bound to the local machine")
+        return self
 
 
 class SpeechSettings(StrictModel):

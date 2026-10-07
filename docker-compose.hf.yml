@@ -1,0 +1,27 @@
+# Hugging Face Inference Providers instead of the local Ollama server:
+#   docker compose -f docker-compose.yml -f docker-compose.hf.yml up -d --build
+# or, to make it the default, put in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.hf.yml
+#
+# Ollama is not started and no LLM weights are downloaded. Speech stays local.
+# Prompts (including each session's flag) and player messages are sent to
+# Hugging Face and to the selected inference provider: see docs/DOCKER.md.
+services:
+  ollama:
+    profiles: ["ollama"]
+
+  ollama-pull:
+    profiles: ["ollama"]
+
+  janus:
+    network_mode: !reset null
+    ports:
+      - "${JANUS_BIND_ADDRESS:-127.0.0.1}:${JANUS_PORT:-8000}:8000"
+    depends_on: !override
+      models:
+        condition: service_completed_successfully
+    environment:
+      JANUS_LLM_PROVIDER: huggingface
+      JANUS_LLM_MODEL: ${JANUS_HF_MODEL:-Qwen/Qwen3-4B-Instruct-2507}
+      HF_TOKEN: ${HF_TOKEN:?set HF_TOKEN in .env to use Hugging Face}
+      HF_BILL_TO: ${HF_BILL_TO:-}

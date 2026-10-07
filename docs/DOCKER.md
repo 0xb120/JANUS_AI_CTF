@@ -70,7 +70,7 @@ terminati con successo.
 ### Perché il namespace di rete condiviso
 
 La configurazione applicativa accetta soltanto URL LLM su loopback
-(`LLMSettings.local_urls_only`). Invece di allentare questo controllo, `janus`
+(`LLMSettings.endpoint_matches_provider`). Invece di allentare questo controllo, `janus`
 usa `network_mode: service:ollama`: i due container condividono lo stesso
 `127.0.0.1`, Ollama ascolta solo su loopback e non è raggiungibile né dall'host
 né da altri container. Per lo stesso motivo la porta di JANUS è dichiarata sul
@@ -78,6 +78,33 @@ servizio `ollama`.
 
 Effetto collaterale: se il container `ollama` viene ricreato, anche `janus`
 va ricreato (`docker compose up -d` lo fa automaticamente).
+
+## Scelta del backend LLM: Ollama o Hugging Face
+
+Ollama locale è il default. Per usare invece Hugging Face Inference Providers:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hf.yml up -d --build
+```
+
+oppure, per renderlo il default di quella copia del repository, in `.env`:
+
+```dotenv
+COMPOSE_FILE=docker-compose.yml:docker-compose.hf.yml
+HF_TOKEN=hf_...
+HF_BILL_TO=my-org                                  # opzionale
+JANUS_HF_MODEL=Qwen/Qwen3-4B-Instruct-2507:nscale  # opzionale
+```
+
+Con l'override HF i servizi `ollama` e `ollama-pull` non partono (nessun
+download di immagine Ollama o pesi LLM), `janus` usa la rete bridge e pubblica
+direttamente la propria porta, sempre su `127.0.0.1` per default. STT e TTS
+restano locali. Se `HF_TOKEN` manca, Compose si ferma con un errore esplicito.
+
+Per tornare a Ollama: `docker compose -f docker-compose.yml -f
+docker-compose.hf.yml down`, quindi `docker compose up -d` (togliendo
+`COMPOSE_FILE` da `.env` se impostato). Implicazioni su privacy e costi in
+[SECURITY.md](SECURITY.md#inferenza-remota-hugging-face-opzionale).
 
 ## Configurazione
 
@@ -93,6 +120,9 @@ facoltative; `.env.example` riporta l'elenco completo.
 | `JANUS_STT_MODEL` | `small` | `tiny`, `base`, `small` o `medium` |
 | `JANUS_TTS_PROVIDER` | `piper` | `piper` oppure `disabled` |
 | `JANUS_PIPER_VOICE_IT` / `_EN` | `it_IT-paola-medium` / `en_US-lessac-medium` | Voci Piper |
+| `HF_TOKEN` | vuoto | Token Hugging Face (solo override HF, obbligatorio) |
+| `HF_BILL_TO` | vuoto | Organizzazione a cui addebitare l'inferenza HF |
+| `JANUS_HF_MODEL` | `Qwen/Qwen3-4B-Instruct-2507` | Modello HF, eventualmente con `:operatore` |
 | `JANUS_SECRET_KEY` | vuoto | Chiave HMAC; se vuota viene generata e salvata nel volume dati |
 | `JANUS_BIND_ADDRESS` | `127.0.0.1` | Indirizzo host su cui pubblicare la porta |
 | `JANUS_PORT` | `8000` | Porta host |
@@ -156,4 +186,5 @@ docker compose exec janus python -c "import urllib.request; print(urllib.request
 | Risposte molto lente su CPU | Usare un modello più piccolo o il profilo GPU |
 
 Riferimento misurato su CPU (16 core, senza GPU) con `qwen3:4b-instruct`: turno
-testuale 11-15 s, turno vocale con STT `small` circa 12 s.
+testuale 11-15 s, turno vocale con STT `small` circa 12 s. Con Hugging Face
+(`Qwen/Qwen3-4B-Instruct-2507:nscale`) la sola inferenza richiede 1-2 s.
